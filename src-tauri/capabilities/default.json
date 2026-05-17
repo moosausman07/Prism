@@ -2,16 +2,19 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "settings"],
+  "windows": ["main", "settings", "reminder"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-close",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-always-on-top",
     "core:window:allow-start-dragging",
     "opener:default",
     "dialog:default",
-    "global-shortcut:default"
+    "global-shortcut:default",
+    "notification:default"
   ]
 }

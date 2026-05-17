@@ -41,6 +41,30 @@ struct IdArg {
     id: String,
 }
 
+#[derive(Serialize)]
+struct ReminderAddArg {
+    name: String,
+    when: String,
+    mode: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+struct ReminderView {
+    id: String,
+    name: String,
+    mode: String,
+    when: String,
+    overdue: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+struct Reminder {
+    id: String,
+    name: String,
+    #[serde(default)]
+    mode: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 struct Entry {
     id: String,
@@ -128,6 +152,10 @@ fn Ic(name: String) -> Element {
                     "pin" => rsx! {
                         line { x1: "12", y1: "17", x2: "12", y2: "22" }
                         path { d: "M9 4h6l-1 6 3 3H7l3-3z" }
+                    },
+                    "bell" => rsx! {
+                        path { d: "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" }
+                        path { d: "M13.73 21a2 2 0 0 1-3.46 0" }
                     },
                     "enter" => rsx! {
                         polyline { points: "9 10 4 15 9 20" }
@@ -240,6 +268,7 @@ async fn do_activate(
     settings: Signal<Settings>,
     mut show_settings: Signal<bool>,
     mut show_clipboard: Signal<bool>,
+    mut show_reminders: Signal<bool>,
     flat: Vec<Entry>,
     idx: usize,
 ) {
@@ -249,6 +278,7 @@ async fn do_activate(
     match e.kind.as_str() {
         "settings" => show_settings.set(true),
         "clipboard" => show_clipboard.set(true),
+        "reminders" => show_reminders.set(true),
         "system" => {
             let _: Option<()> =
                 call("run_system", &ActionArg { action: e.action.clone() }).await;
@@ -284,17 +314,32 @@ async fn do_toggle_pin(
     show_actions.set(false);
 }
 
+fn url_query() -> String {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default()
+}
+
 pub fn App() -> Element {
+    // The fullscreen reminder overlay loads the same bundle with
+    // `?view=reminder`; render the alarm screen instead of the launcher.
+    if url_query().contains("view=reminder") {
+        return rsx! { ReminderAlarm {} };
+    }
+
     let mut entries = use_signal(Vec::<Entry>::new);
     let mut settings = use_signal(Settings::default);
     let mut query = use_signal(String::new);
     let mut sel = use_signal(|| 0usize);
     let mut show_settings = use_signal(|| false);
     let mut show_clipboard = use_signal(|| false);
+    let mut show_reminders = use_signal(|| false);
     let mut show_actions = use_signal(|| false);
     let mut icons = use_signal(std::collections::HashMap::<String, String>::new);
     let mut expanded = use_signal(|| true);
     let mut nav = use_signal(|| false);
+    // None = focus is in the search field; Some(i) = i-th pinned dock circle.
+    let mut dock_sel = use_signal(|| None::<usize>);
 
     use_future(move || async move {
         if let Some(list) = call::<Vec<Entry>>("list_entries", &NoArgs {}).await {
@@ -338,9 +383,11 @@ pub fn App() -> Element {
             query.set(String::new());
             sel.set(0);
             nav.set(false);
+            dock_sel.set(None);
             expanded.set(!c);
             show_settings.set(false);
             show_clipboard.set(false);
+            show_reminders.set(false);
             show_actions.set(false);
             let _ = document::eval(
                 "setTimeout(function(){var x=document.getElementById('search');if(x)x.focus();},20);",
@@ -420,6 +467,22 @@ pub fn App() -> Element {
     let flat_key = flat.clone();
     let act_pin = s.act_pin.to_lowercase();
     let act_open = s.act_open.to_lowercase();
+
+    // Pinned dock entries (mirrors the dock rendered beside the collapsed pill).
+    let pinned_flat: Vec<Entry> = s
+        .pinned
+        .iter()
+        .filter_map(|id| all.iter().find(|e| &e.id == id).cloned())
+        .take(6)
+        .collect();
+    // The dock is only navigable while the launcher is collapsed.
+    let dock_len = if expanded() || !q.trim().is_empty() {
+        0
+    } else {
+        pinned_flat.len()
+    };
+    let pinned_key = pinned_flat.clone();
+
     let onkey = move |ev: KeyboardEvent| {
         let m = ev.modifiers();
         match ev.key() {
@@ -429,6 +492,8 @@ pub fn App() -> Element {
                     show_actions.set(false);
                 } else if show_settings() {
                     show_settings.set(false);
+                } else if show_reminders() {
+                    show_reminders.set(false);
                 } else {
                     spawn(async move {
                         let _: Option<()> = call("hide", &NoArgs {}).await;
@@ -438,6 +503,7 @@ pub fn App() -> Element {
             Key::ArrowDown => {
                 ev.prevent_default();
                 expanded.set(true);
+                dock_sel.set(None);
                 if total > 0 {
                     let n = if !nav() { 0 } else { (cur + 1).min(total - 1) };
                     nav.set(true);
@@ -454,10 +520,40 @@ pub fn App() -> Element {
                     scroll_to(n);
                 }
             }
+            Key::ArrowRight => {
+                if dock_len > 0 {
+                    ev.prevent_default();
+                    let n = match dock_sel() {
+                        None => 0,
+                        Some(i) => (i + 1).min(dock_len - 1),
+                    };
+                    dock_sel.set(Some(n));
+                }
+            }
+            Key::ArrowLeft => {
+                if dock_len > 0 {
+                    if let Some(i) = dock_sel() {
+                        ev.prevent_default();
+                        if i == 0 {
+                            dock_sel.set(None);
+                            let _ = document::eval(
+                                "var e=document.getElementById('search');if(e)e.focus();",
+                            );
+                        } else {
+                            dock_sel.set(Some(i - 1));
+                        }
+                    }
+                }
+            }
             Key::Enter => {
                 ev.prevent_default();
-                let flat = flat_key.clone();
-                spawn(do_activate(settings, show_settings, show_clipboard, flat, cur));
+                if let Some(i) = dock_sel() {
+                    let pv = pinned_key.clone();
+                    spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, pv, i));
+                } else {
+                    let flat = flat_key.clone();
+                    spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, flat, cur));
+                }
             }
             Key::Character(c) => {
                 // Action-popup shortcuts: only while the popup is open.
@@ -473,7 +569,7 @@ pub fn App() -> Element {
                         ev.prevent_default();
                         show_actions.set(false);
                         let flat = flat_key.clone();
-                        spawn(do_activate(settings, show_settings, show_clipboard, flat, cur));
+                        spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, flat, cur));
                         return;
                     }
                 }
@@ -489,6 +585,7 @@ pub fn App() -> Element {
                                 settings,
                                 show_settings,
                                 show_clipboard,
+                                show_reminders,
                                 flat,
                                 n - 1,
                             ));
@@ -519,6 +616,7 @@ pub fn App() -> Element {
         div {
             class: "shell",
             tabindex: "0",
+            oncontextmenu: move |e| e.prevent_default(),
             onkeydown: onkey,
             onclick: move |_| {
                 spawn(async move {
@@ -528,6 +626,8 @@ pub fn App() -> Element {
 
             if show_clipboard() {
                 ClipboardView { backdrop_cls: "backdrop".to_string(), on_close: move |_| show_clipboard.set(false) }
+            } else if show_reminders() {
+                RemindersView { on_close: move |_| show_reminders.set(false) }
             } else if show_settings() {
                 SettingsView { settings, on_close: move |_| show_settings.set(false) }
             } else {
@@ -561,6 +661,7 @@ pub fn App() -> Element {
                                 let empty = v.trim().is_empty();
                                 expanded.set(if empty { !collapsed_setting } else { true });
                                 nav.set(!empty);
+                                dock_sel.set(None);
                                 query.set(v);
                                 sel.set(0);
                             }
@@ -590,7 +691,7 @@ pub fn App() -> Element {
                                             onclick: move |ev| {
                                                 ev.stop_propagation();
                                                 sel.set(idx);
-                                                spawn(do_activate(settings, show_settings, show_clipboard, flat_row.clone(), idx));
+                                                spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, flat_row.clone(), idx));
                                             },
                                             if let Some(u) = icon {
                                                 img { class: "icon-img", src: "{u}" }
@@ -649,7 +750,7 @@ pub fn App() -> Element {
                                         class: "row",
                                         onclick: move |_| {
                                             show_actions.set(false);
-                                            spawn(do_activate(settings, show_settings, show_clipboard, flat_b.clone(), cur));
+                                            spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, flat_b.clone(), cur));
                                         },
                                         div { class: "icon", Ic { name: "enter".to_string() } }
                                         div { class: "title", "Open" }
@@ -673,12 +774,12 @@ pub fn App() -> Element {
                                 let pv = pinned_entries.clone();
                                 rsx! {
                                     button {
-                                        class: "circle",
+                                        class: if dock_sel() == Some(i) { "circle selected" } else { "circle" },
                                         title: "{pe.title}",
                                         style: "animation-delay:{i*40}ms",
                                         onclick: move |e| {
                                             e.stop_propagation();
-                                            spawn(do_activate(settings, show_settings, show_clipboard, pv.clone(), i));
+                                            spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, pv.clone(), i));
                                         },
                                         if let Some(u) = ic {
                                             img { class: "circle-img", src: "{u}" }
@@ -1034,6 +1135,226 @@ fn ClipboardView(backdrop_cls: String, on_close: EventHandler<()>) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn RemindersView(on_close: EventHandler<()>) -> Element {
+    let mut items = use_signal(Vec::<ReminderView>::new);
+    let mut name = use_signal(String::new);
+    let mut when = use_signal(String::new);
+    let mut mode = use_signal(|| "notification".to_string());
+    let mut err = use_signal(String::new);
+
+    let reload = move || {
+        spawn(async move {
+            if let Some(v) = call::<Vec<ReminderView>>("reminders_list", &NoArgs {}).await {
+                items.set(v);
+            }
+        });
+    };
+
+    use_future(move || async move {
+        if let Some(v) = call::<Vec<ReminderView>>("reminders_list", &NoArgs {}).await {
+            items.set(v);
+        }
+        let _ = document::eval(
+            "setTimeout(function(){var e=document.getElementById('rem-name');if(e)e.focus();},40);",
+        );
+    });
+
+    let add = move |_| {
+        let n = name();
+        let w = when();
+        let m = mode();
+        if n.trim().is_empty() {
+            err.set("Give the reminder a name.".into());
+            return;
+        }
+        if w.is_empty() {
+            err.set("Pick a date and time.".into());
+            return;
+        }
+        spawn(async move {
+            let ok: Option<()> = call(
+                "reminder_add",
+                &ReminderAddArg { name: n, when: w, mode: m },
+            )
+            .await;
+            if ok.is_some() {
+                err.set(String::new());
+                name.set(String::new());
+                when.set(String::new());
+                if let Some(v) =
+                    call::<Vec<ReminderView>>("reminders_list", &NoArgs {}).await
+                {
+                    items.set(v);
+                }
+            } else {
+                err.set("Could not save reminder.".into());
+            }
+        });
+    };
+
+    let onkey = move |ev: KeyboardEvent| {
+        if ev.key() == Key::Escape {
+            ev.prevent_default();
+            on_close.call(());
+        }
+    };
+
+    rsx! {
+        div {
+            class: "panel",
+            onclick: move |e| e.stop_propagation(),
+            onkeydown: onkey,
+            div { class: "backdrop" }
+            div { class: "rem",
+                div { class: "rem-header",
+                    button {
+                        class: "cb-back",
+                        onclick: move |e| { e.stop_propagation(); on_close.call(()); },
+                        svg {
+                            class: "back-ic",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2.2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            polyline { points: "15 18 9 12 15 6" }
+                        }
+                    }
+                    h2 { "Reminders" }
+                }
+                div { class: "rem-form",
+                    input {
+                        id: "rem-name",
+                        class: "rem-in",
+                        autocomplete: "off",
+                        placeholder: "What should I remind you about?",
+                        value: "{name}",
+                        oninput: move |e| name.set(e.value()),
+                    }
+                    div { class: "rem-form-row",
+                        input {
+                            r#type: "datetime-local",
+                            class: "rem-in rem-when",
+                            value: "{when}",
+                            oninput: move |e| when.set(e.value()),
+                        }
+                        select {
+                            class: "cb-type",
+                            value: "{mode}",
+                            onchange: move |e| mode.set(e.value()),
+                            option { value: "notification", "Notification" }
+                            option { value: "fullscreen", "Full screen" }
+                        }
+                        button {
+                            class: "rem-add",
+                            onclick: add,
+                            "Add"
+                        }
+                    }
+                    if !err().is_empty() {
+                        div { class: "rem-err", "{err}" }
+                    }
+                }
+                div { class: "rem-list",
+                    if items().is_empty() {
+                        div { class: "empty", "No reminders yet" }
+                    }
+                    for r in items().iter() {
+                        {
+                            let id = r.id.clone();
+                            rsx! {
+                                div { class: "rem-item",
+                                    div { class: "rem-bell",
+                                        Ic { name: "bell".to_string() }
+                                    }
+                                    div { class: "rem-meta",
+                                        div { class: "rem-name", "{r.name}" }
+                                        div {
+                                            class: if r.overdue { "rem-when-lbl overdue" } else { "rem-when-lbl" },
+                                            "{r.when}"
+                                        }
+                                    }
+                                    div { class: "rem-mode",
+                                        if r.mode == "fullscreen" { "Full screen" } else { "Notification" }
+                                    }
+                                    button {
+                                        class: "rem-del",
+                                        onclick: move |e| {
+                                            e.stop_propagation();
+                                            let id = id.clone();
+                                            spawn(async move {
+                                                let _: Option<()> =
+                                                    call("reminder_delete", &IdArg { id }).await;
+                                            });
+                                            reload();
+                                        },
+                                        "Delete"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ReminderAlarm() -> Element {
+    let mut label = use_signal(String::new);
+
+    use_future(move || async move {
+        // Looping chime until dismissed.
+        let _ = document::eval(
+            r#"(function(){try{window.__prismStop=false;
+var C=window.AudioContext||window.webkitAudioContext;if(!C)return;var x=new C();
+function b(){if(window.__prismStop){try{x.close()}catch(e){}return;}
+var o=x.createOscillator(),g=x.createGain();o.type='sine';o.frequency.value=880;
+o.connect(g);g.connect(x.destination);g.gain.setValueAtTime(0.0001,x.currentTime);
+g.gain.exponentialRampToValueAtTime(0.35,x.currentTime+0.05);
+g.gain.exponentialRampToValueAtTime(0.0001,x.currentTime+0.5);
+o.start();o.stop(x.currentTime+0.55);setTimeout(b,900);}b();}catch(e){}})();"#,
+        );
+        if let Some(r) = call::<Option<Reminder>>("current_alarm", &NoArgs {}).await.flatten() {
+            label.set(r.name);
+        }
+        // Refresh the text if another alarm is queued behind this one.
+        let mut e = document::eval(
+            "if(window.__TAURI__)window.__TAURI__.event.listen('prism:alarm',function(){dioxus.send(1);});",
+        );
+        loop {
+            if e.recv::<i32>().await.is_err() {
+                break;
+            }
+            if let Some(r) =
+                call::<Option<Reminder>>("current_alarm", &NoArgs {}).await.flatten()
+            {
+                label.set(r.name);
+            }
+        }
+    });
+
+    let dismiss = move |_| {
+        spawn(async move {
+            let _ = document::eval("window.__prismStop=true;");
+            let _: Option<()> = call("dismiss_alarm", &NoArgs {}).await;
+        });
+    };
+
+    rsx! {
+        link { rel: "stylesheet", href: CSS }
+        div { class: "alarm",
+            div { class: "alarm-bell", Ic { name: "bell".to_string() } }
+            div { class: "alarm-kicker", "Prism Reminder" }
+            div { class: "alarm-title", "{label}" }
+            button { class: "alarm-dismiss", onclick: dismiss, "Dismiss" }
         }
     }
 }

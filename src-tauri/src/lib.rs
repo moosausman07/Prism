@@ -6,6 +6,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 use walkdir::WalkDir;
 
 #[derive(Serialize, Clone)]
@@ -127,6 +128,13 @@ fn list_entries() -> Vec<Entry> {
             subtitle: "System".into(),
             kind: "clipboard".into(),
             action: "open-clipboard".into(),
+        },
+        Entry {
+            id: "prism.reminders".into(),
+            title: "Prism Reminders".into(),
+            subtitle: "System".into(),
+            kind: "reminders".into(),
+            action: "open-reminders".into(),
         },
         Entry {
             id: "prism.settings".into(),
@@ -635,12 +643,193 @@ fn clipboard_clear(app: tauri::AppHandle, state: tauri::State<ClipState>) {
     persist_clips(&clip_path(&app), &items);
 }
 
+// ===== Prism Reminders =====
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Reminder {
+    id: String,
+    name: String,
+    ts: i64,       // unix seconds when it should fire
+    mode: String,  // "fullscreen" | "notification"
+    #[serde(default)]
+    fired: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct ReminderView {
+    id: String,
+    name: String,
+    mode: String,
+    when: String,  // human label, e.g. "May 17, 2026 · 14:30"
+    overdue: bool,
+}
+
+#[derive(Default)]
+struct RemindersState(Mutex<Vec<Reminder>>);
+
+/// Fullscreen reminders that have fired and are waiting to be dismissed.
+#[derive(Default)]
+struct AlarmState(Mutex<Vec<Reminder>>);
+
+fn reminders_path(app: &tauri::AppHandle) -> PathBuf {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("reminders.json")
+}
+
+fn persist_reminders(path: &PathBuf, items: &[Reminder]) {
+    if let Ok(s) = serde_json::to_string_pretty(items) {
+        let _ = std::fs::write(path, s);
+    }
+}
+
+#[tauri::command]
+fn reminders_list(state: tauri::State<RemindersState>) -> Vec<ReminderView> {
+    use chrono::{Local, TimeZone};
+    let now = Local::now().timestamp();
+    let mut v = state.0.lock().unwrap().clone();
+    v.sort_by_key(|r| r.ts);
+    v.into_iter()
+        .map(|r| {
+            let when = Local
+                .timestamp_opt(r.ts, 0)
+                .single()
+                .map(|d| d.format("%b %-d, %Y · %H:%M").to_string())
+                .unwrap_or_else(|| "—".into());
+            ReminderView {
+                id: r.id,
+                name: r.name,
+                mode: r.mode,
+                when,
+                overdue: r.ts <= now,
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn reminder_add(
+    app: tauri::AppHandle,
+    state: tauri::State<RemindersState>,
+    name: String,
+    when: String,
+    mode: String,
+) -> Result<(), String> {
+    use chrono::{Local, NaiveDateTime, TimeZone};
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("name is empty".into());
+    }
+    // `when` is a browser datetime-local value: "YYYY-MM-DDTHH:MM".
+    let naive = NaiveDateTime::parse_from_str(&when, "%Y-%m-%dT%H:%M")
+        .map_err(|_| "invalid date/time".to_string())?;
+    let ts = Local
+        .from_local_datetime(&naive)
+        .single()
+        .ok_or_else(|| "ambiguous date/time".to_string())?
+        .timestamp();
+    let mode = if mode == "fullscreen" {
+        "fullscreen"
+    } else {
+        "notification"
+    }
+    .to_string();
+    let mut items = state.0.lock().unwrap();
+    items.push(Reminder {
+        id: format!("{}", chrono::Local::now().timestamp_millis()),
+        name,
+        ts,
+        mode,
+        fired: false,
+    });
+    persist_reminders(&reminders_path(&app), &items);
+    Ok(())
+}
+
+#[tauri::command]
+fn reminder_delete(
+    app: tauri::AppHandle,
+    state: tauri::State<RemindersState>,
+    id: String,
+) {
+    let mut items = state.0.lock().unwrap();
+    items.retain(|r| r.id != id);
+    persist_reminders(&reminders_path(&app), &items);
+}
+
+/// Returns the fullscreen reminder currently demanding attention, if any.
+#[tauri::command]
+fn current_alarm(alarm: tauri::State<AlarmState>) -> Option<Reminder> {
+    alarm.0.lock().unwrap().first().cloned()
+}
+
+/// Dismiss the active fullscreen alarm. Closes the overlay window when the
+/// last pending alarm is cleared.
+#[tauri::command]
+fn dismiss_alarm(
+    app: tauri::AppHandle,
+    alarm: tauri::State<AlarmState>,
+    reminders: tauri::State<RemindersState>,
+) {
+    let remaining = {
+        let mut a = alarm.0.lock().unwrap();
+        if !a.is_empty() {
+            let done = a.remove(0);
+            let mut rs = reminders.0.lock().unwrap();
+            rs.retain(|r| r.id != done.id);
+            persist_reminders(&reminders_path(&app), &rs);
+        }
+        a.len()
+    };
+    if remaining == 0 {
+        if let Some(w) = app.get_webview_window("reminder") {
+            let _ = w.hide();
+            let _ = w.close();
+        }
+    } else if let Some(w) = app.get_webview_window("reminder") {
+        let _ = w.emit("prism:alarm", ());
+    }
+}
+
+/// Pop the fullscreen alarm overlay on top of everything.
+fn show_alarm_window(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(w) = app.get_webview_window("reminder") {
+            let _ = w.show();
+            let _ = w.set_fullscreen(true);
+            let _ = w.set_always_on_top(true);
+            let _ = w.set_focus();
+            let _ = w.emit("prism:alarm", ());
+        } else {
+            let _ = tauri::WebviewWindowBuilder::new(
+                &app,
+                "reminder",
+                tauri::WebviewUrl::App("index.html?view=reminder".into()),
+            )
+            .title("Prism Reminder")
+            .fullscreen(true)
+            .always_on_top(true)
+            .decorations(false)
+            .skip_taskbar(true)
+            .focused(true)
+            .build();
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(ClipState::default())
+        .manage(RemindersState::default())
+        .manage(AlarmState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -759,6 +948,63 @@ pub fn run() {
                 });
             }
 
+            // Load persisted reminders, then poll for ones that come due.
+            {
+                let handle = app.handle().clone();
+                let rpath = reminders_path(&handle);
+                if let Ok(s) = std::fs::read_to_string(&rpath) {
+                    if let Ok(v) = serde_json::from_str::<Vec<Reminder>>(&s) {
+                        let st = handle.state::<RemindersState>();
+                        *st.0.lock().unwrap() = v;
+                    }
+                }
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let now = chrono::Local::now().timestamp();
+                    let mut due: Vec<Reminder> = Vec::new();
+                    {
+                        let st = handle.state::<RemindersState>();
+                        let mut items = st.0.lock().unwrap();
+                        for r in items.iter_mut() {
+                            if !r.fired && r.ts <= now {
+                                r.fired = true;
+                                due.push(r.clone());
+                            }
+                        }
+                        if !due.is_empty() {
+                            // Notification reminders are one-shot: drop them
+                            // once shown. Fullscreen ones stay until dismissed.
+                            items.retain(|r| {
+                                !(r.fired && r.mode != "fullscreen")
+                            });
+                            persist_reminders(&reminders_path(&handle), &items);
+                        }
+                    }
+                    let mut want_window = false;
+                    for r in due {
+                        if r.mode == "fullscreen" {
+                            handle
+                                .state::<AlarmState>()
+                                .0
+                                .lock()
+                                .unwrap()
+                                .push(r);
+                            want_window = true;
+                        } else {
+                            let _ = handle
+                                .notification()
+                                .builder()
+                                .title("Prism Reminder")
+                                .body(&r.name)
+                                .show();
+                        }
+                    }
+                    if want_window {
+                        show_alarm_window(&handle);
+                    }
+                });
+            }
+
             // Hide when the launcher loses focus (lightweight, Raycast-style).
             if let Some(w) = app.get_webview_window("main") {
                 let wc = w.clone();
@@ -785,7 +1031,12 @@ pub fn run() {
             clipboard_history,
             clipboard_apply,
             clipboard_delete,
-            clipboard_clear
+            clipboard_clear,
+            reminders_list,
+            reminder_add,
+            reminder_delete,
+            current_alarm,
+            dismiss_alarm
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
