@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.1.0"
+version = "0.0.1"
 description = "Prism launcher"
 authors = ["you"]
 edition = "2021"
@@ -26,6 +26,8 @@ dirs = "5"
 image = { version = "0.25", default-features = false, features = ["png"] }
 arboard = "3"
 chrono = "0.4"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+semver = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

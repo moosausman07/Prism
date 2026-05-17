@@ -65,6 +65,30 @@ struct Reminder {
     mode: String,
 }
 
+#[derive(Serialize)]
+struct TagArg {
+    tag: String,
+}
+
+#[derive(Deserialize, Clone, PartialEq, Default)]
+struct UpdateStatus {
+    current: String,
+    latest: String,
+    tag: String,
+    has_update: bool,
+    url: String,
+}
+
+#[derive(Deserialize, Clone, PartialEq)]
+struct ReleaseRow {
+    tag: String,
+    name: String,
+    notes: String,
+    published: String,
+    current: bool,
+    installable: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 struct Entry {
     id: String,
@@ -269,6 +293,7 @@ async fn do_activate(
     mut show_settings: Signal<bool>,
     mut show_clipboard: Signal<bool>,
     mut show_reminders: Signal<bool>,
+    mut show_updates: Signal<bool>,
     flat: Vec<Entry>,
     idx: usize,
 ) {
@@ -279,6 +304,7 @@ async fn do_activate(
         "settings" => show_settings.set(true),
         "clipboard" => show_clipboard.set(true),
         "reminders" => show_reminders.set(true),
+        "updates" => show_updates.set(true),
         "system" => {
             let _: Option<()> =
                 call("run_system", &ActionArg { action: e.action.clone() }).await;
@@ -334,6 +360,7 @@ pub fn App() -> Element {
     let mut show_settings = use_signal(|| false);
     let mut show_clipboard = use_signal(|| false);
     let mut show_reminders = use_signal(|| false);
+    let mut show_updates = use_signal(|| false);
     let mut show_actions = use_signal(|| false);
     let mut icons = use_signal(std::collections::HashMap::<String, String>::new);
     let mut expanded = use_signal(|| true);
@@ -388,6 +415,7 @@ pub fn App() -> Element {
             show_settings.set(false);
             show_clipboard.set(false);
             show_reminders.set(false);
+            show_updates.set(false);
             show_actions.set(false);
             let _ = document::eval(
                 "setTimeout(function(){var x=document.getElementById('search');if(x)x.focus();},20);",
@@ -494,6 +522,8 @@ pub fn App() -> Element {
                     show_settings.set(false);
                 } else if show_reminders() {
                     show_reminders.set(false);
+                } else if show_updates() {
+                    show_updates.set(false);
                 } else {
                     spawn(async move {
                         let _: Option<()> = call("hide", &NoArgs {}).await;
@@ -549,10 +579,10 @@ pub fn App() -> Element {
                 ev.prevent_default();
                 if let Some(i) = dock_sel() {
                     let pv = pinned_key.clone();
-                    spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, pv, i));
+                    spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, pv, i));
                 } else {
                     let flat = flat_key.clone();
-                    spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, flat, cur));
+                    spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, flat, cur));
                 }
             }
             Key::Character(c) => {
@@ -569,7 +599,7 @@ pub fn App() -> Element {
                         ev.prevent_default();
                         show_actions.set(false);
                         let flat = flat_key.clone();
-                        spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, flat, cur));
+                        spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, flat, cur));
                         return;
                     }
                 }
@@ -586,6 +616,7 @@ pub fn App() -> Element {
                                 show_settings,
                                 show_clipboard,
                                 show_reminders,
+                                show_updates,
                                 flat,
                                 n - 1,
                             ));
@@ -628,6 +659,8 @@ pub fn App() -> Element {
                 ClipboardView { backdrop_cls: "backdrop".to_string(), on_close: move |_| show_clipboard.set(false) }
             } else if show_reminders() {
                 RemindersView { on_close: move |_| show_reminders.set(false) }
+            } else if show_updates() {
+                UpdatesView { on_close: move |_| show_updates.set(false) }
             } else if show_settings() {
                 SettingsView { settings, on_close: move |_| show_settings.set(false) }
             } else {
@@ -691,7 +724,7 @@ pub fn App() -> Element {
                                             onclick: move |ev| {
                                                 ev.stop_propagation();
                                                 sel.set(idx);
-                                                spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, flat_row.clone(), idx));
+                                                spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, flat_row.clone(), idx));
                                             },
                                             if let Some(u) = icon {
                                                 img { class: "icon-img", src: "{u}" }
@@ -750,7 +783,7 @@ pub fn App() -> Element {
                                         class: "row",
                                         onclick: move |_| {
                                             show_actions.set(false);
-                                            spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, flat_b.clone(), cur));
+                                            spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, flat_b.clone(), cur));
                                         },
                                         div { class: "icon", Ic { name: "enter".to_string() } }
                                         div { class: "title", "Open" }
@@ -779,7 +812,7 @@ pub fn App() -> Element {
                                         style: "animation-delay:{i*40}ms",
                                         onclick: move |e| {
                                             e.stop_propagation();
-                                            spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, pv.clone(), i));
+                                            spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, pv.clone(), i));
                                         },
                                         if let Some(u) = ic {
                                             img { class: "circle-img", src: "{u}" }
@@ -1355,6 +1388,141 @@ o.start();o.stop(x.currentTime+0.55);setTimeout(b,900);}b();}catch(e){}})();"#,
             div { class: "alarm-kicker", "Prism Reminder" }
             div { class: "alarm-title", "{label}" }
             button { class: "alarm-dismiss", onclick: dismiss, "Dismiss" }
+        }
+    }
+}
+
+#[component]
+fn UpdatesView(on_close: EventHandler<()>) -> Element {
+    let mut status = use_signal(UpdateStatus::default);
+    let mut rows = use_signal(Vec::<ReleaseRow>::new);
+    let mut loading = use_signal(|| true);
+    let mut msg = use_signal(String::new);
+
+    use_future(move || async move {
+        loading.set(true);
+        if let Some(s) = call::<UpdateStatus>("update_check", &NoArgs {}).await {
+            status.set(s);
+        }
+        match call::<Vec<ReleaseRow>>("update_releases", &NoArgs {}).await {
+            Some(v) => rows.set(v),
+            None => msg.set("Could not reach GitHub. Check GH_PAT / network.".into()),
+        }
+        loading.set(false);
+    });
+
+    let install = move |tag: String| {
+        msg.set(format!("Downloading {tag}… Prism will restart to finish installing."));
+        spawn(async move {
+            let ok: Option<()> = call("update_install", &TagArg { tag }).await;
+            if ok.is_none() {
+                msg.set("Install failed. See the release page for the installer.".into());
+            }
+        });
+    };
+
+    let onkey = move |ev: KeyboardEvent| {
+        if ev.key() == Key::Escape {
+            ev.prevent_default();
+            on_close.call(());
+        }
+    };
+
+    let st = status();
+    let install_latest = {
+        let tag = st.tag.clone();
+        let mut install = install.clone();
+        move |_| install(tag.clone())
+    };
+
+    rsx! {
+        div {
+            class: "panel",
+            onclick: move |e| e.stop_propagation(),
+            onkeydown: onkey,
+            div { class: "backdrop" }
+            div { class: "upd",
+                div { class: "rem-header",
+                    button {
+                        class: "cb-back",
+                        onclick: move |e| { e.stop_propagation(); on_close.call(()); },
+                        svg {
+                            class: "back-ic",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2.2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            polyline { points: "15 18 9 12 15 6" }
+                        }
+                    }
+                    h2 { "Updates" }
+                }
+                div {
+                    class: if st.has_update { "upd-banner has-update" } else { "upd-banner" },
+                    div { class: "upd-cur",
+                        div { class: "upd-cur-v", "Current · v{st.current}" }
+                        div { class: "upd-cur-s",
+                            if loading() {
+                                "Checking for updates…"
+                            } else if st.has_update {
+                                "Update available: v{st.latest}"
+                            } else {
+                                "You're on the latest version."
+                            }
+                        }
+                    }
+                    if st.has_update {
+                        button {
+                            class: "rem-add",
+                            onclick: install_latest,
+                            "Update now"
+                        }
+                    }
+                }
+                if !msg().is_empty() {
+                    div { class: "upd-msg", "{msg}" }
+                }
+                div { class: "rem-list",
+                    if rows().is_empty() && !loading() {
+                        div { class: "empty", "No releases found" }
+                    }
+                    for r in rows().iter() {
+                        {
+                            let tag = r.tag.clone();
+                            let mut install = install.clone();
+                            rsx! {
+                                div {
+                                    class: if r.current { "upd-rel current" } else { "upd-rel" },
+                                    div { class: "upd-rel-head",
+                                        div { class: "upd-rel-name",
+                                            "{r.name}"
+                                            if r.current {
+                                                span { class: "upd-tag-cur", "INSTALLED" }
+                                            }
+                                        }
+                                        div { class: "upd-rel-meta", "{r.tag} · {r.published}" }
+                                    }
+                                    if !r.notes.is_empty() {
+                                        div { class: "upd-notes", "{r.notes}" }
+                                    }
+                                    if r.installable {
+                                        button {
+                                            class: "rem-del upd-install",
+                                            onclick: move |e| {
+                                                e.stop_propagation();
+                                                install(tag.clone());
+                                            },
+                                            "Install this version"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

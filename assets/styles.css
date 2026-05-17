@@ -1002,3 +1002,111 @@ body.light .cb-type option {
 .alarm-dismiss:hover {
   background: rgba(120, 130, 255, 0.92);
 }
+
+/* ===== Updates ===== */
+.upd {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  height: 78vh;
+}
+
+.upd-banner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0 20px 14px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.upd-banner.has-update {
+  background: rgba(120, 130, 255, 0.14);
+  border-color: rgba(120, 130, 255, 0.4);
+}
+
+.upd-cur {
+  flex: 1;
+}
+
+.upd-cur-v {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f1f1f3;
+}
+
+.upd-cur-s {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  margin-top: 3px;
+}
+
+.upd-msg {
+  margin: 0 20px 12px;
+  font-size: 13px;
+  color: #cdd2ff;
+}
+
+.upd-rel {
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  margin-bottom: 6px;
+}
+
+.upd-rel:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.upd-rel.current {
+  background: rgba(120, 130, 255, 0.12);
+  border-color: rgba(120, 130, 255, 0.45);
+}
+
+.upd-rel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.upd-rel-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #ededef;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.upd-tag-cur {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: #cdd2ff;
+  background: rgba(120, 130, 255, 0.3);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+
+.upd-rel-meta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.42);
+  flex-shrink: 0;
+}
+
+.upd-notes {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-top: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.upd-install {
+  margin-top: 12px;
+}

@@ -137,6 +137,13 @@ fn list_entries() -> Vec<Entry> {
             action: "open-reminders".into(),
         },
         Entry {
+            id: "prism.updates".into(),
+            title: "Check for Updates".into(),
+            subtitle: "System".into(),
+            kind: "updates".into(),
+            action: "open-updates".into(),
+        },
+        Entry {
             id: "prism.settings".into(),
             title: "Prism Settings".into(),
             subtitle: "System".into(),
@@ -821,6 +828,259 @@ fn show_alarm_window(app: &tauri::AppHandle) {
     });
 }
 
+// ===== Auto update =====
+
+const GH_OWNER: &str = "moosausman07";
+const GH_REPO: &str = "prism";
+const UPDATE_INTERVAL_SECS: u64 = 3 * 60 * 60; // every 3 hours
+
+fn pat() -> Option<String> {
+    std::env::var("GH_PAT").ok().filter(|s| !s.trim().is_empty())
+}
+
+#[derive(Deserialize)]
+struct GhAsset {
+    name: String,
+    url: String, // API asset URL (works for private repos)
+}
+
+#[derive(Deserialize)]
+struct GhRelease {
+    tag_name: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    html_url: String,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    assets: Vec<GhAsset>,
+}
+
+#[derive(Serialize, Clone)]
+struct UpdateStatus {
+    current: String,
+    latest: String,
+    tag: String,
+    has_update: bool,
+    url: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ReleaseRow {
+    tag: String,
+    name: String,
+    notes: String,
+    published: String,
+    current: bool,
+    installable: bool,
+}
+
+fn current_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn ver_of(tag: &str) -> Option<semver::Version> {
+    semver::Version::parse(tag.trim_start_matches(['v', 'V'])).ok()
+}
+
+fn gh_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .user_agent("prism-updater")
+        .build()
+        .unwrap_or_default()
+}
+
+fn gh_get(url: &str) -> Result<reqwest::blocking::Response, String> {
+    let mut req = gh_client()
+        .get(url)
+        .header("Accept", "application/vnd.github+json");
+    if let Some(p) = pat() {
+        req = req.bearer_auth(p);
+    }
+    let resp = req.send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API error: {}", resp.status()));
+    }
+    Ok(resp)
+}
+
+fn fetch_releases() -> Result<Vec<GhRelease>, String> {
+    let url = format!(
+        "https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/releases?per_page=100"
+    );
+    gh_get(&url)?.json().map_err(|e| e.to_string())
+}
+
+fn fetch_release_by_tag(tag: &str) -> Result<GhRelease, String> {
+    let url = format!(
+        "https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/releases/tags/{tag}"
+    );
+    gh_get(&url)?.json().map_err(|e| e.to_string())
+}
+
+/// Newest non-draft, non-prerelease release (or None if none usable).
+fn newest_release(rels: &[GhRelease]) -> Option<&GhRelease> {
+    rels.iter()
+        .filter(|r| !r.draft && !r.prerelease)
+        .filter(|r| ver_of(&r.tag_name).is_some())
+        .max_by(|a, b| {
+            ver_of(&a.tag_name)
+                .unwrap()
+                .cmp(&ver_of(&b.tag_name).unwrap())
+        })
+}
+
+fn do_update_check() -> Result<UpdateStatus, String> {
+    let cur = current_version();
+    let rels = fetch_releases()?;
+    let (latest, tag, url, has) = match newest_release(&rels) {
+        Some(r) => {
+            let newer = match (ver_of(&r.tag_name), ver_of(&cur)) {
+                (Some(rv), Some(cv)) => rv > cv,
+                _ => false,
+            };
+            (
+                r.tag_name.trim_start_matches(['v', 'V']).to_string(),
+                r.tag_name.clone(),
+                r.html_url.clone(),
+                newer,
+            )
+        }
+        None => (cur.clone(), String::new(), String::new(), false),
+    };
+    Ok(UpdateStatus {
+        current: cur,
+        latest,
+        tag,
+        has_update: has,
+        url,
+    })
+}
+
+/// Download the NSIS setup .exe of a release and launch it silently.
+/// The running app is asked to quit so the installer can replace it.
+fn do_install(app: &tauri::AppHandle, tag: &str) -> Result<(), String> {
+    let rel = fetch_release_by_tag(tag)?;
+    let asset = rel
+        .assets
+        .iter()
+        .find(|a| a.name.to_lowercase().ends_with(".exe"))
+        .ok_or_else(|| "no Windows installer in this release".to_string())?;
+
+    // GitHub asset API: ask for the binary, handle the S3 redirect manually
+    // so the Authorization header is not forwarded to storage.
+    let no_redirect = reqwest::blocking::Client::builder()
+        .user_agent("prism-updater")
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut req = no_redirect
+        .get(&asset.url)
+        .header("Accept", "application/octet-stream");
+    if let Some(p) = pat() {
+        req = req.bearer_auth(p);
+    }
+    let resp = req.send().map_err(|e| e.to_string())?;
+
+    let bytes = if resp.status().is_redirection() {
+        let loc = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "missing redirect location".to_string())?
+            .to_string();
+        gh_client()
+            .get(&loc)
+            .send()
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?
+            .bytes()
+            .map_err(|e| e.to_string())?
+    } else if resp.status().is_success() {
+        resp.bytes().map_err(|e| e.to_string())?
+    } else {
+        return Err(format!("download failed: {}", resp.status()));
+    };
+
+    let out = std::env::temp_dir().join(&asset.name);
+    std::fs::write(&out, &bytes).map_err(|e| e.to_string())?;
+
+    // Wait ~2s (so this process can exit and release its exe), then run the
+    // NSIS installer silently.
+    let cmd = format!(
+        "ping 127.0.0.1 -n 3 >NUL & start \"\" \"{}\" /S",
+        out.display()
+    );
+    Command::new("cmd")
+        .args(["/C", &cmd])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_check() -> Result<UpdateStatus, String> {
+    tauri::async_runtime::spawn_blocking(do_update_check)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn update_releases() -> Result<Vec<ReleaseRow>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let cur = current_version();
+        let mut rels = fetch_releases()?;
+        rels.sort_by(|a, b| match (ver_of(&b.tag_name), ver_of(&a.tag_name)) {
+            (Some(bv), Some(av)) => bv.cmp(&av),
+            _ => b.tag_name.cmp(&a.tag_name),
+        });
+        Ok(rels
+            .into_iter()
+            .filter(|r| !r.draft)
+            .map(|r| {
+                let tagv = r.tag_name.trim_start_matches(['v', 'V']).to_string();
+                let is_cur = tagv == cur;
+                let has_exe = r
+                    .assets
+                    .iter()
+                    .any(|a| a.name.to_lowercase().ends_with(".exe"));
+                ReleaseRow {
+                    name: r.name.clone().filter(|s| !s.is_empty()).unwrap_or_else(
+                        || r.tag_name.clone(),
+                    ),
+                    notes: r.body.clone().unwrap_or_default(),
+                    published: r
+                        .published_at
+                        .clone()
+                        .map(|s| s.chars().take(10).collect())
+                        .unwrap_or_default(),
+                    current: is_cur,
+                    installable: has_exe && !is_cur,
+                    tag: r.tag_name,
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle, tag: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || do_install(&app, &tag))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1005,6 +1265,26 @@ pub fn run() {
                 });
             }
 
+            // Auto-update: check GitHub every 3h and silently install a
+            // newer release when one is available.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    // Small initial delay so startup isn't blocked.
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    loop {
+                        if let Ok(st) = do_update_check() {
+                            if st.has_update && !st.tag.is_empty() {
+                                let _ = do_install(&handle, &st.tag);
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(
+                            UPDATE_INTERVAL_SECS,
+                        ));
+                    }
+                });
+            }
+
             // Hide when the launcher loses focus (lightweight, Raycast-style).
             if let Some(w) = app.get_webview_window("main") {
                 let wc = w.clone();
@@ -1036,7 +1316,10 @@ pub fn run() {
             reminder_add,
             reminder_delete,
             current_alarm,
-            dismiss_alarm
+            dismiss_alarm,
+            update_check,
+            update_releases,
+            update_install
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,0 +1,102 @@
+name: release
+
+# Build + publish a Windows release whenever the version in
+# src-tauri/Cargo.toml is bumped above the latest published release.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+# A merged PR fires both `push` and `pull_request:closed`; serialize so the
+# second run sees the freshly-created tag and skips re-releasing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Run on direct pushes to main, or when a PR is actually merged into main.
+    if: github.event_name == 'push' || github.event.pull_request.merged == true
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve versions
+        id: ver
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          LATEST=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+          LATEST=${LATEST#v}
+          [ -z "$LATEST" ] && LATEST="0.0.0"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+          # proceed only if CURRENT is strictly greater than LATEST (semver).
+          TOP=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)
+          if [ "$CURRENT" != "$LATEST" ] && [ "$TOP" = "$CURRENT" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Cargo.toml=$CURRENT  latest release=$LATEST"
+
+      - name: Install Rust
+        if: steps.ver.outputs.proceed == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        if: steps.ver.outputs.proceed == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install CLIs (dioxus + tauri)
+        if: steps.ver.outputs.proceed == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: dioxus-cli@0.7.0,tauri-cli@2
+
+      - name: Sync tauri.conf.json version
+        if: steps.ver.outputs.proceed == 'true'
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.current }}"
+          tmp=$(mktemp)
+          jq --arg v "$V" '.version = $v' src-tauri/tauri.conf.json > "$tmp"
+          mv "$tmp" src-tauri/tauri.conf.json
+
+      - name: Build Windows bundle (NSIS)
+        if: steps.ver.outputs.proceed == 'true'
+        run: cargo tauri build
+
+      - name: Publish release
+        if: steps.ver.outputs.proceed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.ver.outputs.current }}"
+          TAG="v$V"
+          ASSET=$(find src-tauri/target/release/bundle/nsis -name '*-setup.exe' | head -1)
+          if [ -z "$ASSET" ]; then
+            ASSET=$(find src-tauri/target/release/bundle/nsis -name '*.exe' | head -1)
+          fi
+          echo "Releasing $TAG with asset: $ASSET"
+          gh release create "$TAG" "$ASSET" \
+            --title "$TAG" \
+            --target "$GITHUB_SHA" \
+            --generate-notes
