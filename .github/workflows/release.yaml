@@ -91,9 +91,10 @@ jobs:
         run: |
           V="${{ steps.ver.outputs.current }}"
           TAG="v$V"
-          ASSET=$(find src-tauri/target/release/bundle/nsis -name '*-setup.exe' | head -1)
+          # Cargo workspace → shared target dir at repo root, not src-tauri/.
+          ASSET=$(find target/release/bundle/nsis -name '*-setup.exe' | head -1)
           if [ -z "$ASSET" ]; then
-            ASSET=$(find src-tauri/target/release/bundle/nsis -name '*.exe' | head -1)
+            ASSET=$(find target/release/bundle/nsis -name '*.exe' | head -1)
           fi
           echo "Releasing $TAG with asset: $ASSET"
           gh release create "$TAG" "$ASSET" \
