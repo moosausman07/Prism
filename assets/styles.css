@@ -310,8 +310,8 @@ body {
 .row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 5px var(--space-3);
+  gap: 11px;
+  padding: 8px var(--space-3);
   border-radius: var(--radius-sm);
   cursor: pointer;
   border: 1px solid transparent;
@@ -326,18 +326,25 @@ body {
   border-color: var(--border-selected);
 }
 
+/* All row icons (SVG glyph, app image, clipboard PNG) share one box so
+   they render at an identical visual size. */
 .row .icon {
-  width: 17px;
-  text-align: center;
-  font-size: 14px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
   opacity: 0.92;
+  flex-shrink: 0;
 }
 
 .icon-img {
-  width: 17px;
-  height: 17px;
+  width: 24px;
+  height: 24px;
   object-fit: contain;
-  border-radius: 4px;
+  border-radius: 5px;
+  flex-shrink: 0;
 }
 
 .row .title {
@@ -757,8 +764,8 @@ body {
 }
 
 .row .icon .ic-svg {
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
   opacity: 0.85;
 }
 

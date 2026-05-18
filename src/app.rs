@@ -6,6 +6,7 @@ use wasm_bindgen::prelude::*;
 
 static CSS: Asset = asset!("/assets/styles.css");
 static PRISM_ICON: Asset = asset!("/assets/prism.png");
+static CLIPBOARD_ICON: Asset = asset!("/assets/clipboard_icon.png");
 
 #[wasm_bindgen]
 extern "C" {
@@ -898,6 +899,8 @@ pub fn App() -> Element {
                                             },
                                             if let Some(u) = icon {
                                                 img { class: "icon-img", src: "{u}" }
+                                            } else if e.kind == "clipboard" {
+                                                img { class: "icon-img", src: CLIPBOARD_ICON }
                                             } else {
                                                 div { class: "icon", Ic { name: icon_name(e).to_string() } }
                                             }

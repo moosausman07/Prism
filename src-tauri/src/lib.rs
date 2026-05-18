@@ -1752,15 +1752,14 @@ pub fn run() {
             }
 
             // Hide when the launcher loses focus (lightweight, Raycast-style).
-            // TESTING: disabled so the panel stays open when clicking outside.
-            // if let Some(w) = app.get_webview_window("main") {
-            //     let wc = w.clone();
-            //     w.on_window_event(move |ev| {
-            //         if let tauri::WindowEvent::Focused(false) = ev {
-            //             let _ = wc.hide();
-            //         }
-            //     });
-            // }
+            if let Some(w) = app.get_webview_window("main") {
+                let wc = w.clone();
+                w.on_window_event(move |ev| {
+                    if let tauri::WindowEvent::Focused(false) = ev {
+                        let _ = wc.hide();
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
