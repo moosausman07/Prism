@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 static CSS: Asset = asset!("/assets/styles.css");
+static PRISM_ICON: Asset = asset!("/assets/prism.png");
 
 #[wasm_bindgen]
 extern "C" {
@@ -39,6 +40,16 @@ struct SettingsArg {
 #[derive(Serialize)]
 struct IdArg {
     id: String,
+}
+
+#[derive(Serialize)]
+struct NameArg {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct QueryArg {
+    query: String,
 }
 
 #[derive(Serialize)]
@@ -113,6 +124,36 @@ struct ClipView {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(default)]
+struct Theme {
+    id: String,
+    name: String,
+    appearance: String, // "dark" | "light"
+    bg_kind: String,    // "solid" | "gradient"
+    bg_start: String,
+    bg_end: String,
+    text: String,
+    selection: String,
+    accent: String,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Theme {
+            id: String::new(),
+            name: "New Theme".into(),
+            appearance: "dark".into(),
+            bg_kind: "solid".into(),
+            bg_start: "#0b0b10".into(),
+            bg_end: "#1a1a2e".into(),
+            text: "#f4f4f6".into(),
+            selection: "#2a2a3a".into(),
+            accent: "#7882ff".into(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
 struct Settings {
     pinned: Vec<String>,
     recent: Vec<String>,
@@ -121,6 +162,9 @@ struct Settings {
     act_pin: String,
     act_open: String,
     theme: String,
+    custom_themes: Vec<Theme>,
+    search_url: String,
+    aliases: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -133,15 +177,21 @@ impl Default for Settings {
             act_pin: "p".into(),
             act_open: "o".into(),
             theme: "system".into(),
+            custom_themes: Vec::new(),
+            search_url: "https://www.google.com/search?q=%s".into(),
+            aliases: std::collections::BTreeMap::new(),
         }
     }
 }
 
 fn icon_name(e: &Entry) -> &'static str {
     match e.kind.as_str() {
-        "settings" => "gear",
+        "settings" | "config" => "gear",
         "system" => "monitor",
         "clipboard" => "clipboard",
+        "mode" => "gem",
+        "websearch" => "file",
+        "themes" => "gem",
         _ => "app",
     }
 }
@@ -253,7 +303,59 @@ fn fuzzy(q: &str, title: &str) -> bool {
     true
 }
 
+/// CSS custom properties a custom Theme overrides on :root.
+const THEME_VARS: &[&str] = &[
+    "--surface-base",
+    "--text-primary",
+    "--text-strong",
+    "--surface-active",
+    "--accent",
+    "--accent-strong",
+];
+
 fn apply_css(s: &Settings) {
+    // A custom theme is selected when `theme` matches a stored theme id.
+    if let Some(t) = s.custom_themes.iter().find(|t| t.id == s.theme) {
+        let bg = if t.bg_kind == "gradient" {
+            format!("linear-gradient(145deg, {} 0%, {} 100%)", t.bg_start, t.bg_end)
+        } else {
+            t.bg_start.clone()
+        };
+        let light = t.appearance == "light";
+        let js = format!(
+            r##"(function(){{
+  var r=document.documentElement.style;
+  r.setProperty('--surface-base',"{bg}");
+  r.setProperty('--bg-color',"{start}");
+  r.setProperty('--text-primary',"{text}");
+  r.setProperty('--text-strong',"{text}");
+  r.setProperty('--surface-active',"{sel}");
+  r.setProperty('--accent',"{acc}");
+  r.setProperty('--accent-strong',"{acc}");
+  document.body.classList.toggle('light',{light});
+  document.body.classList.toggle('dark',{dark});
+}})();"##,
+            bg = bg,
+            start = t.bg_start,
+            text = t.text,
+            sel = t.selection,
+            acc = t.accent,
+            light = light,
+            dark = !light,
+        );
+        let _ = document::eval(&js);
+        return;
+    }
+
+    // Built-in keyword theme: clear any custom-theme overrides first.
+    let clear = THEME_VARS
+        .iter()
+        .map(|v| format!("r.removeProperty('{v}');"))
+        .collect::<String>();
+    let _ = document::eval(&format!(
+        "(function(){{var r=document.documentElement.style;{clear}}})();"
+    ));
+
     // theme: system | dark | light | custom
     let js = format!(
         r##"(function(){{
@@ -277,6 +379,17 @@ fn apply_css(s: &Settings) {
 }
 
 fn scroll_to(idx: usize) {
+    if idx == 0 {
+        // First row: scroll its scrollable container fully to the top so the
+        // section header ("All") above it also comes into view.
+        let _ = document::eval(
+            "var e=document.getElementById('row-0');\
+             if(e){var p=e.parentElement;\
+             while(p&&p.scrollHeight<=p.clientHeight)p=p.parentElement;\
+             if(p)p.scrollTop=0;}",
+        );
+        return;
+    }
     let _ = document::eval(&format!(
         "var e=document.getElementById('row-{idx}');\
          if(e)e.scrollIntoView({{block:'nearest'}});"
@@ -302,6 +415,19 @@ async fn do_activate(
     };
     match e.kind.as_str() {
         "settings" => show_settings.set(true),
+        "themes" => {
+            let _: Option<()> = call("open_themes_window", &NoArgs {}).await;
+        }
+        "config" => {
+            let _: Option<()> = call("open_config_file", &NoArgs {}).await;
+        }
+        "mode" => {
+            let _: Option<()> = call("run_mode", &NameArg { name: e.action.clone() }).await;
+        }
+        "websearch" => {
+            let _: Option<()> =
+                call("web_search", &QueryArg { query: e.action.clone() }).await;
+        }
         "clipboard" => show_clipboard.set(true),
         "reminders" => show_reminders.set(true),
         "updates" => show_updates.set(true),
@@ -351,6 +477,10 @@ pub fn App() -> Element {
     // `?view=reminder`; render the alarm screen instead of the launcher.
     if url_query().contains("view=reminder") {
         return rsx! { ReminderAlarm {} };
+    }
+    // The Theme Studio is its own decorated window (`?view=themes`).
+    if url_query().contains("view=themes") {
+        return rsx! { ThemeStudio {} };
     }
 
     let mut entries = use_signal(Vec::<Entry>::new);
@@ -423,6 +553,37 @@ pub fn App() -> Element {
         }
     });
 
+    // Clipboard hotkey (from config.toml) opens the clipboard view.
+    use_future(move || async move {
+        let mut e = document::eval(
+            "if(window.__TAURI__)window.__TAURI__.event.listen('prism:clipboard',function(){dioxus.send(1);});",
+        );
+        loop {
+            if e.recv::<i32>().await.is_err() {
+                break;
+            }
+            expanded.set(true);
+            show_clipboard.set(true);
+        }
+    });
+
+    // Re-apply styling live when Theme Studio saves/applies a theme.
+    use_future(move || async move {
+        let mut e = document::eval(
+            "if(window.__TAURI__)window.__TAURI__.event.listen('prism:theme',function(){dioxus.send(1);});",
+        );
+        loop {
+            if e.recv::<i32>().await.is_err() {
+                break;
+            }
+            if let Some(s) = call::<Settings>("load_settings", &NoArgs {}).await {
+                apply_css(&s);
+                expanded.set(!s.collapsed);
+                settings.set(s);
+            }
+        }
+    });
+
     // Re-apply theme when the OS light/dark preference changes (system mode).
     use_future(move || async move {
         let mut e = document::eval(
@@ -471,7 +632,21 @@ pub fn App() -> Element {
             sections.push(("ALL".into(), others));
         }
     } else {
-        let ql = q.to_lowercase();
+        let qt = q.trim();
+        let ql = qt.to_lowercase();
+
+        // Alias: typing an alias key jumps straight to its target.
+        if let Some(target) = s.aliases.get(&ql) {
+            let tl = target.to_lowercase();
+            if let Some(hit) = all
+                .iter()
+                .find(|e| e.title.to_lowercase().contains(&tl))
+                .cloned()
+            {
+                sections.push((format!("ALIAS · {ql}"), vec![hit]));
+            }
+        }
+
         let mut hits: Vec<Entry> = all
             .iter()
             .filter(|e| fuzzy(&ql, &e.title.to_lowercase()))
@@ -482,6 +657,23 @@ pub fn App() -> Element {
             (!t.starts_with(&ql), t.len())
         });
         sections.push(("RESULTS".into(), hits));
+
+        // "add ? to search the web" (RustCast convention).
+        if let Some(term) = qt.strip_suffix('?') {
+            let term = term.trim();
+            if !term.is_empty() {
+                sections.push((
+                    "WEB SEARCH".into(),
+                    vec![Entry {
+                        id: "prism.websearch".into(),
+                        title: format!("Search the web for \u{201c}{term}\u{201d}"),
+                        subtitle: "Web Search".into(),
+                        kind: "websearch".into(),
+                        action: term.to_string(),
+                    }],
+                ));
+            }
+        }
     }
 
     let flat: Vec<Entry> = sections.iter().flat_map(|(_, v)| v.clone()).collect();
@@ -603,25 +795,9 @@ pub fn App() -> Element {
                         return;
                     }
                 }
-                if m.ctrl() {
-                    if c == "k" {
-                        ev.prevent_default();
-                        show_actions.toggle();
-                    } else if let Ok(n) = c.parse::<usize>() {
-                        if (1..=9).contains(&n) && n <= total {
-                            ev.prevent_default();
-                            let flat = flat_key.clone();
-                            spawn(do_activate(
-                                settings,
-                                show_settings,
-                                show_clipboard,
-                                show_reminders,
-                                show_updates,
-                                flat,
-                                n - 1,
-                            ));
-                        }
-                    }
+                if m.ctrl() && c == "k" {
+                    ev.prevent_default();
+                    show_actions.toggle();
                 }
             }
             _ => {}
@@ -670,15 +846,10 @@ pub fn App() -> Element {
                     onclick: move |e| e.stop_propagation(),
                     div { class: "backdrop" }
                     div { class: "searchbar",
-                        svg {
+                        img {
                             class: "search-ic",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            circle { cx: "11", cy: "11", r: "7" }
-                            line { x1: "16.5", y1: "16.5", x2: "21", y2: "21" }
+                            src: PRISM_ICON,
+                            alt: "Prism",
                         }
                         input {
                             id: "search",
@@ -687,7 +858,7 @@ pub fn App() -> Element {
                             autocorrect: "off",
                             autocapitalize: "off",
                             spellcheck: false,
-                            placeholder: "Spotlight Search",
+                            placeholder: "Search for apps and commands",
                             value: "{query}",
                             oninput: move |e| {
                                 let v = e.value();
@@ -714,7 +885,6 @@ pub fn App() -> Element {
                                     let idx = qk;
                                     qk += 1;
                                     let pinned = s.pinned.contains(&e.id);
-                                    let qkey = if idx < 9 { Some(idx + 1) } else { None };
                                     let flat_row = flat.clone();
                                     let icon = icons.read().get(&e.id).cloned();
                                     rsx! {
@@ -734,13 +904,9 @@ pub fn App() -> Element {
                                             div { class: "title", "{e.title}" }
                                             div { class: "subtitle", "{e.subtitle}" }
                                             div { class: "spacer" }
-                                            div { class: "chips",
-                                                if pinned {
+                                            if pinned {
+                                                div { class: "chips",
                                                     div { class: "chip pin-chip", Ic { name: "pin".to_string() } }
-                                                }
-                                                if let Some(k) = qkey {
-                                                    div { class: "chip", "Ctrl" }
-                                                    div { class: "chip", "{k}" }
                                                 }
                                             }
                                         }
@@ -1521,6 +1687,320 @@ fn UpdatesView(on_close: EventHandler<()>) -> Element {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+// ===== Theme Studio (separate `?view=themes` window) =====
+
+fn theme_style(t: &Theme) -> String {
+    let bg = if t.bg_kind == "gradient" {
+        format!("linear-gradient(145deg, {} 0%, {} 100%)", t.bg_start, t.bg_end)
+    } else {
+        t.bg_start.clone()
+    };
+    format!(
+        "--surface-base:{bg};--bg-color:{start};--text-primary:{text};\
+         --text-strong:{text};--surface-active:{sel};--accent:{acc};\
+         --accent-strong:{acc};",
+        bg = bg,
+        start = t.bg_start,
+        text = t.text,
+        sel = t.selection,
+        acc = t.accent,
+    )
+}
+
+async fn persist_themes(mut settings: Signal<Settings>, list: Vec<Theme>, active: Option<String>) {
+    let mut st = settings();
+    st.custom_themes = list;
+    if let Some(id) = active {
+        st.theme = id;
+    }
+    let _: Option<()> = call("save_settings", &SettingsArg { settings: st.clone() }).await;
+    let _: Option<()> = call("theme_changed", &NoArgs {}).await;
+    settings.set(st);
+}
+
+#[component]
+fn ThemeStudio() -> Element {
+    let mut settings = use_signal(Settings::default);
+    let mut themes = use_signal(Vec::<Theme>::new);
+    let mut draft = use_signal(Theme::default);
+    // None = a built-in keyword theme is active (no inspector).
+    let mut editing = use_signal(|| None::<String>);
+
+    use_future(move || async move {
+        if let Some(s) = call::<Settings>("load_settings", &NoArgs {}).await {
+            themes.set(s.custom_themes.clone());
+            if let Some(t) = s.custom_themes.iter().find(|t| t.id == s.theme) {
+                draft.set(t.clone());
+                editing.set(Some(t.id.clone()));
+            }
+            settings.set(s);
+        }
+    });
+
+    let active = settings().theme;
+
+    let select_custom = move |t: Theme| {
+        let mut draft = draft;
+        let mut editing = editing;
+        draft.set(t.clone());
+        editing.set(Some(t.id.clone()));
+    };
+
+    let new_theme = move |_| {
+        let n = themes()
+            .iter()
+            .filter_map(|t| t.id.strip_prefix("theme-").and_then(|x| x.parse::<u32>().ok()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut t = Theme::default();
+        t.id = format!("theme-{n}");
+        t.name = format!("New Theme {n}");
+        let mut list = themes();
+        list.push(t.clone());
+        themes.set(list.clone());
+        draft.set(t.clone());
+        editing.set(Some(t.id.clone()));
+        spawn(persist_themes(settings, list, None));
+    };
+
+    let save_apply = move |_| {
+        let d = draft();
+        let mut list = themes();
+        if let Some(pos) = list.iter().position(|t| t.id == d.id) {
+            list[pos] = d.clone();
+        } else {
+            list.push(d.clone());
+        }
+        themes.set(list.clone());
+        spawn(persist_themes(settings, list, Some(d.id.clone())));
+    };
+
+    let delete_theme = move |_| {
+        let mut themes = themes;
+        let mut editing = editing;
+        if let Some(id) = editing() {
+            let list: Vec<Theme> = themes().into_iter().filter(|t| t.id != id).collect();
+            themes.set(list.clone());
+            editing.set(None);
+            let reset = if settings().theme == id {
+                Some("system".to_string())
+            } else {
+                None
+            };
+            spawn(persist_themes(settings, list, reset));
+        }
+    };
+
+    let apply_builtin = move |kw: String| {
+        let mut editing = editing;
+        editing.set(None);
+        spawn(persist_themes(settings, themes(), Some(kw)));
+    };
+
+    let set_field = move |f: &'static str, v: String| {
+        let mut draft = draft;
+        let mut d = draft();
+        match f {
+            "name" => d.name = v,
+            "appearance" => d.appearance = v,
+            "bg_kind" => d.bg_kind = v,
+            "bg_start" => d.bg_start = v,
+            "bg_end" => d.bg_end = v,
+            "text" => d.text = v,
+            "selection" => d.selection = v,
+            "accent" => d.accent = v,
+            _ => {}
+        }
+        draft.set(d);
+    };
+
+    let d = draft();
+    let is_editing = editing().is_some();
+    let prev_style = theme_style(&d);
+    let count = themes().len() + 3;
+
+    rsx! {
+        link { rel: "stylesheet", href: CSS }
+        div { class: "ts",
+            aside { class: "ts-side",
+                div { class: "ts-side-h", "Theme Studio" }
+                div { class: "ts-side-sub",
+                    span { "Installed Themes" }
+                    span { class: "ts-count", "{count}" }
+                }
+                div { class: "ts-list",
+                    button {
+                        class: if active == "dark" { "ts-item active" } else { "ts-item" },
+                        onclick: move |_| apply_builtin("dark".to_string()),
+                        span { class: "ts-dot", style: "background:#0b0b10" }
+                        span { class: "ts-item-n", "Prism Dark" }
+                        span { class: "ts-lock", "🔒" }
+                    }
+                    button {
+                        class: if active == "light" { "ts-item active" } else { "ts-item" },
+                        onclick: move |_| apply_builtin("light".to_string()),
+                        span { class: "ts-dot", style: "background:#ffffff" }
+                        span { class: "ts-item-n", "Prism Light" }
+                        span { class: "ts-lock", "🔒" }
+                    }
+                    button {
+                        class: if active == "system" { "ts-item active" } else { "ts-item" },
+                        onclick: move |_| apply_builtin("system".to_string()),
+                        span { class: "ts-dot", style: "background:linear-gradient(90deg,#0b0b10 50%,#fff 50%)" }
+                        span { class: "ts-item-n", "System" }
+                        span { class: "ts-lock", "🔒" }
+                    }
+                    for t in themes() {
+                        button {
+                            key: "{t.id}",
+                            class: if editing() == Some(t.id.clone()) { "ts-item active" } else { "ts-item" },
+                            onclick: {
+                                let t2 = t.clone();
+                                move |_| select_custom(t2.clone())
+                            },
+                            span { class: "ts-dot", style: "background:{t.accent}" }
+                            span { class: "ts-item-n", "{t.name}" }
+                            if active == t.id {
+                                span { class: "ts-check", "✓" }
+                            }
+                        }
+                    }
+                }
+                button { class: "ts-new", onclick: new_theme, "+ New Theme" }
+            }
+
+            main { class: "ts-stage",
+                div { class: "ts-beta", "Live Preview" }
+                div { class: "ts-preview", style: "{prev_style}",
+                    div { class: "panel",
+                        div { class: "backdrop" }
+                        div { class: "searchbar",
+                            img { class: "search-ic", src: PRISM_ICON, alt: "Prism" }
+                            div { class: "ts-fake-input", "Search for apps and commands..." }
+                        }
+                        div { class: "divider" }
+                        div { class: "ts-prev-list",
+                            div { class: "section-label", "SUGGESTIONS" }
+                            div { class: "row selected",
+                                div { class: "icon", Ic { name: "app".to_string() } }
+                                div { class: "title", "Primary Text" }
+                                div { class: "subtitle", "Selected row" }
+                                div { class: "spacer" }
+                                div { class: "chips", div { class: "chip", "↵" } }
+                            }
+                            div { class: "row",
+                                div { class: "icon", Ic { name: "clipboard".to_string() } }
+                                div { class: "title", "Clipboard History" }
+                                div { class: "subtitle", "Command" }
+                            }
+                            div { class: "row",
+                                div { class: "icon", Ic { name: "bell".to_string() } }
+                                div { class: "title", "Prism Reminders" }
+                                div { class: "subtitle", "Command" }
+                            }
+                            div { class: "section-label", "ACCENT" }
+                            div { class: "row",
+                                div { class: "icon", Ic { name: "gem".to_string() } }
+                                div { class: "title", "Accent Button" }
+                                div { class: "spacer" }
+                                button { class: "rem-add", "Action" }
+                            }
+                        }
+                        div { class: "footer",
+                            div { class: "brand",
+                                img { class: "search-ic", src: PRISM_ICON, alt: "" }
+                                span { "Theme Studio Preview" }
+                            }
+                            div { class: "acts",
+                                span { class: "strong", "Open Command" }
+                                span { class: "chip", "↵" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            aside { class: "ts-insp",
+                if is_editing {
+                    div { class: "ts-field",
+                        label { "Theme Name" }
+                        input {
+                            class: "rem-in",
+                            value: "{d.name}",
+                            oninput: move |e| set_field("name", e.value()),
+                        }
+                    }
+                    div { class: "ts-field",
+                        label { "Theme Appearance" }
+                        div { class: "ts-seg",
+                            button {
+                                class: if d.appearance == "light" { "ts-seg-b on" } else { "ts-seg-b" },
+                                onclick: move |_| set_field("appearance", "light".to_string()),
+                                "☀ Light"
+                            }
+                            button {
+                                class: if d.appearance == "dark" { "ts-seg-b on" } else { "ts-seg-b" },
+                                onclick: move |_| set_field("appearance", "dark".to_string()),
+                                "☾ Dark"
+                            }
+                        }
+                    }
+                    div { class: "ts-group", "Background" }
+                    div { class: "ts-field",
+                        div { class: "ts-seg",
+                            button {
+                                class: if d.bg_kind == "solid" { "ts-seg-b on" } else { "ts-seg-b" },
+                                onclick: move |_| set_field("bg_kind", "solid".to_string()),
+                                "Solid"
+                            }
+                            button {
+                                class: if d.bg_kind == "gradient" { "ts-seg-b on" } else { "ts-seg-b" },
+                                onclick: move |_| set_field("bg_kind", "gradient".to_string()),
+                                "Gradient"
+                            }
+                        }
+                    }
+                    ColorRow { label: "Start Color".to_string(), value: d.bg_start.clone(), on: move |v| set_field("bg_start", v) }
+                    if d.bg_kind == "gradient" {
+                        ColorRow { label: "End Color".to_string(), value: d.bg_end.clone(), on: move |v| set_field("bg_end", v) }
+                    }
+                    div { class: "ts-group", "Primary Colors" }
+                    ColorRow { label: "Text".to_string(), value: d.text.clone(), on: move |v| set_field("text", v) }
+                    ColorRow { label: "Selection".to_string(), value: d.selection.clone(), on: move |v| set_field("selection", v) }
+                    ColorRow { label: "Accent".to_string(), value: d.accent.clone(), on: move |v| set_field("accent", v) }
+                    div { class: "ts-actions",
+                        button { class: "rem-add", onclick: save_apply, "Save & Apply" }
+                        button { class: "rem-del", onclick: delete_theme, "Delete" }
+                    }
+                } else {
+                    div { class: "ts-empty",
+                        "Select a custom theme to edit it, or create a new one."
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ColorRow(label: String, value: String, on: EventHandler<String>) -> Element {
+    rsx! {
+        div { class: "ts-color-row",
+            span { "{label}" }
+            div { class: "ts-color-wrap",
+                span { class: "ts-color-hex", "{value}" }
+                input {
+                    r#type: "color",
+                    class: "ts-color",
+                    value: "{value}",
+                    oninput: move |e| on.call(e.value()),
                 }
             }
         }

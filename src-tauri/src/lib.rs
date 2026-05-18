@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -18,6 +19,38 @@ struct Entry {
     action: String, // path for apps, keyword for system, "open-settings" etc.
 }
 
+/// A user-defined color theme. `theme` in Settings holds either a built-in
+/// keyword (system/dark/light/custom) or the `id` of one of these.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
+struct Theme {
+    id: String,
+    name: String,
+    appearance: String, // "dark" | "light"
+    bg_kind: String,    // "solid" | "gradient"
+    bg_start: String,
+    bg_end: String,
+    text: String,
+    selection: String,
+    accent: String,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Theme {
+            id: String::new(),
+            name: "New Theme".into(),
+            appearance: "dark".into(),
+            bg_kind: "solid".into(),
+            bg_start: "#0b0b10".into(),
+            bg_end: "#1a1a2e".into(),
+            text: "#f4f4f6".into(),
+            selection: "#ffffff14".into(),
+            accent: "#7882ff".into(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 struct Settings {
@@ -28,6 +61,98 @@ struct Settings {
     act_pin: String,
     act_open: String,
     theme: String,
+    custom_themes: Vec<Theme>,
+    // Mirrored from config.toml so the frontend can use them without a
+    // second round-trip. These are config-owned (edited via the TOML file).
+    search_url: String,
+    aliases: BTreeMap<String, String>,
+}
+
+/// Prism-managed runtime state, persisted under the `[prism]` table.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
+struct PrismState {
+    pinned: Vec<String>,
+    recent: Vec<String>,
+    bg_color: String,
+    collapsed: bool,
+    act_pin: String,
+    act_open: String,
+    theme: String,
+}
+
+impl Default for PrismState {
+    fn default() -> Self {
+        PrismState {
+            pinned: Vec::new(),
+            recent: Vec::new(),
+            bg_color: "#222222".into(),
+            collapsed: true,
+            act_pin: "p".into(),
+            act_open: "o".into(),
+            theme: "system".into(),
+        }
+    }
+}
+
+/// The single source of truth: `config.toml` in the app config dir.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
+struct Config {
+    toggle_hotkey: String,
+    clipboard_hotkey: String,
+    search_url: String,
+    clear_on_enter: bool,
+    show_trayicon: bool,
+    prism: PrismState,
+    aliases: BTreeMap<String, String>,
+    modes: BTreeMap<String, String>,
+    custom_themes: Vec<Theme>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            toggle_hotkey: "ALT+SPACE".into(),
+            clipboard_hotkey: String::new(),
+            search_url: "https://www.google.com/search?q=%s".into(),
+            clear_on_enter: true,
+            show_trayicon: true,
+            prism: PrismState::default(),
+            aliases: BTreeMap::new(),
+            modes: BTreeMap::new(),
+            custom_themes: Vec::new(),
+        }
+    }
+}
+
+impl Config {
+    fn to_settings(&self) -> Settings {
+        Settings {
+            pinned: self.prism.pinned.clone(),
+            recent: self.prism.recent.clone(),
+            bg_color: self.prism.bg_color.clone(),
+            collapsed: self.prism.collapsed,
+            act_pin: self.prism.act_pin.clone(),
+            act_open: self.prism.act_open.clone(),
+            theme: self.prism.theme.clone(),
+            custom_themes: self.custom_themes.clone(),
+            search_url: self.search_url.clone(),
+            aliases: self.aliases.clone(),
+        }
+    }
+
+    /// Fold frontend-editable state back in, leaving TOML-only keys intact.
+    fn merge_settings(&mut self, s: &Settings) {
+        self.prism.pinned = s.pinned.clone();
+        self.prism.recent = s.recent.clone();
+        self.prism.bg_color = s.bg_color.clone();
+        self.prism.collapsed = s.collapsed;
+        self.prism.act_pin = s.act_pin.clone();
+        self.prism.act_open = s.act_open.clone();
+        self.prism.theme = s.theme.clone();
+        self.custom_themes = s.custom_themes.clone();
+    }
 }
 
 impl Default for Settings {
@@ -40,38 +165,156 @@ impl Default for Settings {
             act_pin: "p".into(),
             act_open: "o".into(),
             theme: "system".into(),
+            custom_themes: Vec::new(),
+            search_url: "https://www.google.com/search?q=%s".into(),
+            aliases: BTreeMap::new(),
         }
     }
 }
 
-fn settings_path(app: &tauri::AppHandle) -> PathBuf {
+fn config_dir(app: &tauri::AppHandle) -> PathBuf {
     let dir = app
         .path()
         .app_config_dir()
         .unwrap_or_else(|_| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("settings.json")
+    dir
+}
+
+fn config_path(app: &tauri::AppHandle) -> PathBuf {
+    config_dir(app).join("config.toml")
+}
+
+/// A commented default config so first-time users can discover every key.
+const DEFAULT_CONFIG_TOML: &str = r#"# Prism configuration — this file is the single source of truth.
+# Edit it directly (the "Edit Config File" command opens it), then
+# re-open Prism. Theme Studio writes the [[custom_themes]] section.
+
+toggle_hotkey    = "ALT+SPACE"     # global launcher hotkey
+clipboard_hotkey = ""              # e.g. "SUPER+SHIFT+V" (empty = disabled)
+search_url       = "https://www.google.com/search?q=%s"
+clear_on_enter   = true
+show_trayicon    = true
+
+# Aliases: type the alias to jump straight to an app/command.
+[aliases]
+# ff = "Firefox"
+# code = "Visual Studio Code"
+
+# Modes: run any shell script straight from the launcher.
+[modes]
+# focus = "~/scripts/focus.sh"
+
+# Prism-managed state (pins, recents, active theme). Safe to leave as-is.
+[prism]
+"#;
+
+/// Load config.toml, creating it (and migrating any legacy settings.json)
+/// on first run.
+fn load_config(app: &tauri::AppHandle) -> Config {
+    let p = config_path(app);
+    if let Ok(s) = std::fs::read_to_string(&p) {
+        return toml::from_str(&s).unwrap_or_default();
+    }
+    // Migrate from the old settings.json if present.
+    let legacy = config_dir(app).join("settings.json");
+    if let Ok(s) = std::fs::read_to_string(&legacy) {
+        if let Ok(old) = serde_json::from_str::<Settings>(&s) {
+            let mut cfg = Config::default();
+            cfg.merge_settings(&old);
+            save_config(app, &cfg);
+            return cfg;
+        }
+    }
+    // Fresh install: write the commented template.
+    let _ = std::fs::write(&p, DEFAULT_CONFIG_TOML);
+    toml::from_str(DEFAULT_CONFIG_TOML).unwrap_or_default()
+}
+
+fn save_config(app: &tauri::AppHandle, cfg: &Config) {
+    if let Ok(body) = toml::to_string_pretty(cfg) {
+        let _ = std::fs::write(config_path(app), body);
+    }
 }
 
 #[tauri::command]
 fn load_settings(app: tauri::AppHandle) -> Settings {
-    let p = settings_path(&app);
-    std::fs::read_to_string(p)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    load_config(&app).to_settings()
 }
 
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), String> {
-    let p = settings_path(&app);
-    let s = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(p, s).map_err(|e| e.to_string())
+    let mut cfg = load_config(&app);
+    cfg.merge_settings(&settings);
+    save_config(&app, &cfg);
+    Ok(())
+}
+
+/// Open config.toml in the user's default editor.
+#[tauri::command]
+fn open_config_file(app: tauri::AppHandle) -> Result<(), String> {
+    let _ = load_config(&app); // ensure it exists
+    let p = config_path(&app);
+    tauri_plugin_opener::open_path(p.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Open the configured search engine with the query substituted for %s.
+#[tauri::command]
+fn web_search(app: tauri::AppHandle, query: String) -> Result<(), String> {
+    let cfg = load_config(&app);
+    let enc = urlencode(&query);
+    let url = if cfg.search_url.contains("%s") {
+        cfg.search_url.replace("%s", &enc)
+    } else {
+        format!("{}{}", cfg.search_url, enc)
+    };
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Run a `[modes]` shell script by name.
+#[tauri::command]
+fn run_mode(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    let cfg = load_config(&app);
+    let script = cfg
+        .modes
+        .get(&name)
+        .ok_or_else(|| format!("unknown mode: {name}"))?
+        .clone();
+    let expanded = expand_tilde(&script);
+    #[cfg(windows)]
+    let r = Command::new("cmd").args(["/C", &expanded]).spawn();
+    #[cfg(not(windows))]
+    let r = Command::new("sh").args(["-c", &expanded]).spawn();
+    r.map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn expand_tilde(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}{}", home.display(), rest);
+        }
+    }
+    p.to_string()
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 /// Recursively scan Windows Start Menu folders for .lnk / .url shortcuts.
 #[tauri::command]
-fn list_entries() -> Vec<Entry> {
+fn list_entries(app: tauri::AppHandle) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
 
     let roots: Vec<PathBuf> = {
@@ -151,6 +394,13 @@ fn list_entries() -> Vec<Entry> {
             action: "open-settings".into(),
         },
         Entry {
+            id: "prism.themes".into(),
+            title: "Theme Studio".into(),
+            subtitle: "Customize, create and apply themes".into(),
+            kind: "themes".into(),
+            action: "open-themes".into(),
+        },
+        Entry {
             id: "sys.lock".into(),
             title: "Lock Screen".into(),
             subtitle: "System".into(),
@@ -192,7 +442,27 @@ fn list_entries() -> Vec<Entry> {
             kind: "system".into(),
             action: "trash".into(),
         },
+        Entry {
+            id: "prism.config".into(),
+            title: "Edit Config File".into(),
+            subtitle: "Open config.toml".into(),
+            kind: "config".into(),
+            action: "open-config".into(),
+        },
     ];
+
+    // User-defined modes from config.toml ([modes]).
+    let cfg = load_config(&app);
+    for (name, _script) in cfg.modes.iter() {
+        builtins.push(Entry {
+            id: format!("mode.{name}"),
+            title: name.clone(),
+            subtitle: "Mode".into(),
+            kind: "mode".into(),
+            action: name.clone(),
+        });
+    }
+
     builtins.append(&mut entries);
     builtins
 }
@@ -417,7 +687,7 @@ fn open_settings_window(app: tauri::AppHandle) {
         let _ = tauri::WebviewWindowBuilder::new(
             &app,
             "settings",
-            tauri::WebviewUrl::App("index.html?view=settings".into()),
+            tauri::WebviewUrl::App("?view=settings".into()),
         )
         .title("Prism Settings")
         .inner_size(560.0, 640.0)
@@ -438,9 +708,54 @@ fn close_settings_window(app: tauri::AppHandle) {
     }
 }
 
+/// Open (or focus) the Theme Studio in its own decorated, resizable window.
+#[tauri::command]
+fn open_themes_window(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("themes") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    } else {
+        let _ = tauri::WebviewWindowBuilder::new(
+            &app,
+            "themes",
+            tauri::WebviewUrl::App("?view=themes".into()),
+        )
+        .title("Prism Theme Studio")
+        .inner_size(1040.0, 680.0)
+        .min_inner_size(820.0, 560.0)
+        .resizable(true)
+        .decorations(true)
+        .skip_taskbar(false)
+        .center()
+        .build();
+    }
+    hide_main(&app);
+}
+
+/// Broadcast to every window that the active theme/settings changed so the
+/// launcher re-applies its styling live.
+#[tauri::command]
+fn theme_changed(app: tauri::AppHandle) {
+    let _ = app.emit("prism:theme", ());
+}
+
 fn hide_main(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
+    }
+}
+
+/// Center the launcher horizontally but place it higher than screen center
+/// (Raycast-style: roughly the upper third of the monitor).
+fn position_main(w: &tauri::WebviewWindow) {
+    if let (Ok(Some(monitor)), Ok(win_size)) = (w.current_monitor(), w.outer_size()) {
+        let mon_pos = monitor.position();
+        let mon_size = monitor.size();
+        let x = mon_pos.x + ((mon_size.width as i32 - win_size.width as i32) / 2);
+        // ~15% from the top of the monitor instead of vertically centered.
+        let y = mon_pos.y + (mon_size.height as i32 * 20 / 100);
+        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
     }
 }
 
@@ -449,6 +764,7 @@ fn toggle_main(app: &tauri::AppHandle) {
         if w.is_visible().unwrap_or(false) {
             let _ = w.hide();
         } else {
+            position_main(&w);
             let _ = w.show();
             let _ = w.set_focus();
             let _ = w.emit("prism:focus", ());
@@ -815,7 +1131,7 @@ fn show_alarm_window(app: &tauri::AppHandle) {
             let _ = tauri::WebviewWindowBuilder::new(
                 &app,
                 "reminder",
-                tauri::WebviewUrl::App("index.html?view=reminder".into()),
+                tauri::WebviewUrl::App("?view=reminder".into()),
             )
             .title("Prism Reminder")
             .fullscreen(true)
@@ -1081,23 +1397,150 @@ async fn update_install(app: tauri::AppHandle, tag: String) -> Result<(), String
         .map_err(|e| e.to_string())?
 }
 
+/// Parsed global hotkeys, populated at setup from config.toml.
+#[derive(Default)]
+struct HotkeyState(Mutex<(Option<Shortcut>, Option<Shortcut>)>);
+
+fn key_code(k: &str) -> Option<Code> {
+    Some(match k {
+        "SPACE" => Code::Space,
+        "ENTER" | "RETURN" => Code::Enter,
+        "TAB" => Code::Tab,
+        "ESC" | "ESCAPE" => Code::Escape,
+        "BACKSPACE" => Code::Backspace,
+        "0" => Code::Digit0,
+        "1" => Code::Digit1,
+        "2" => Code::Digit2,
+        "3" => Code::Digit3,
+        "4" => Code::Digit4,
+        "5" => Code::Digit5,
+        "6" => Code::Digit6,
+        "7" => Code::Digit7,
+        "8" => Code::Digit8,
+        "9" => Code::Digit9,
+        "A" => Code::KeyA,
+        "B" => Code::KeyB,
+        "C" => Code::KeyC,
+        "D" => Code::KeyD,
+        "E" => Code::KeyE,
+        "F" => Code::KeyF,
+        "G" => Code::KeyG,
+        "H" => Code::KeyH,
+        "I" => Code::KeyI,
+        "J" => Code::KeyJ,
+        "K" => Code::KeyK,
+        "L" => Code::KeyL,
+        "M" => Code::KeyM,
+        "N" => Code::KeyN,
+        "O" => Code::KeyO,
+        "P" => Code::KeyP,
+        "Q" => Code::KeyQ,
+        "R" => Code::KeyR,
+        "S" => Code::KeyS,
+        "T" => Code::KeyT,
+        "U" => Code::KeyU,
+        "V" => Code::KeyV,
+        "W" => Code::KeyW,
+        "X" => Code::KeyX,
+        "Y" => Code::KeyY,
+        "Z" => Code::KeyZ,
+        "F1" => Code::F1,
+        "F2" => Code::F2,
+        "F3" => Code::F3,
+        "F4" => Code::F4,
+        "F5" => Code::F5,
+        "F6" => Code::F6,
+        "F7" => Code::F7,
+        "F8" => Code::F8,
+        "F9" => Code::F9,
+        "F10" => Code::F10,
+        "F11" => Code::F11,
+        "F12" => Code::F12,
+        _ => return None,
+    })
+}
+
+/// Parse strings like "ALT+SPACE", "SUPER+SHIFT+V", "CTRL+ALT+1".
+fn parse_hotkey(s: &str) -> Option<Shortcut> {
+    if s.trim().is_empty() {
+        return None;
+    }
+    let mut mods = Modifiers::empty();
+    let mut code: Option<Code> = None;
+    for raw in s.split('+') {
+        match raw.trim().to_uppercase().as_str() {
+            "ALT" | "OPTION" => mods |= Modifiers::ALT,
+            "CTRL" | "CONTROL" => mods |= Modifiers::CONTROL,
+            "SHIFT" => mods |= Modifiers::SHIFT,
+            "SUPER" | "CMD" | "COMMAND" | "WIN" | "META" => mods |= Modifiers::SUPER,
+            other => code = Some(key_code(other)?),
+        }
+    }
+    Some(Shortcut::new(
+        if mods.is_empty() { None } else { Some(mods) },
+        code?,
+    ))
+}
+
+/// Handle prism:// URLs: open?target=, show, quit.
+fn handle_deeplink(app: &tauri::AppHandle, url: &str) {
+    let rest = url
+        .strip_prefix("prism://")
+        .or_else(|| url.strip_prefix("prism:"))
+        .unwrap_or(url);
+    let (action, qs) = rest.split_once('?').unwrap_or((rest, ""));
+    match action.trim_matches('/') {
+        "show" => {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+                let _ = w.emit("prism:focus", ());
+            }
+        }
+        "quit" => app.exit(0),
+        "open" => {
+            let target = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("target=")
+                    .map(|v| v.replace('+', " ").replace("%20", " "))
+            });
+            if let Some(t) = target {
+                let _ = tauri_plugin_opener::open_path(t, None::<&str>);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(ClipState::default())
         .manage(RemindersState::default())
         .manage(AlarmState::default())
+        .manage(HotkeyState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        let toggle =
-                            Shortcut::new(Some(Modifiers::ALT), Code::Space);
-                        if shortcut == &toggle {
-                            toggle_main(app);
+                    if event.state() != ShortcutState::Pressed {
+                        return;
+                    }
+                    let (toggle, clip) = {
+                        let st = app.state::<HotkeyState>();
+                        let g = st.0.lock().unwrap();
+                        g.clone()
+                    };
+                    if toggle.as_ref() == Some(shortcut) {
+                        toggle_main(app);
+                    } else if clip.as_ref() == Some(shortcut) {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                            let _ = w.emit("prism:focus", ());
+                            let _ = w.emit("prism:clipboard", ());
                         }
                     }
                 })
@@ -1105,8 +1548,31 @@ pub fn run() {
         )
         .setup(|app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            let toggle = Shortcut::new(Some(Modifiers::ALT), Code::Space);
-            app.global_shortcut().register(toggle)?;
+
+            // Global hotkeys come from config.toml.
+            let cfg = load_config(&app.handle());
+            let toggle = parse_hotkey(&cfg.toggle_hotkey)
+                .or_else(|| parse_hotkey("ALT+SPACE"));
+            let clip = parse_hotkey(&cfg.clipboard_hotkey);
+            if let Some(t) = &toggle {
+                let _ = app.global_shortcut().register(t.clone());
+            }
+            if let Some(c) = &clip {
+                let _ = app.global_shortcut().register(c.clone());
+            }
+            *app.state::<HotkeyState>().0.lock().unwrap() = (toggle, clip);
+
+            // Register the prism:// deep-link scheme at runtime (Windows).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register("prism");
+                let h = app.handle().clone();
+                app.deep_link().on_open_url(move |ev| {
+                    for url in ev.urls() {
+                        handle_deeplink(&h, url.as_str());
+                    }
+                });
+            }
 
             // Load persisted clipboard history, then poll for changes.
             {
@@ -1286,14 +1752,15 @@ pub fn run() {
             }
 
             // Hide when the launcher loses focus (lightweight, Raycast-style).
-            if let Some(w) = app.get_webview_window("main") {
-                let wc = w.clone();
-                w.on_window_event(move |ev| {
-                    if let tauri::WindowEvent::Focused(false) = ev {
-                        let _ = wc.hide();
-                    }
-                });
-            }
+            // TESTING: disabled so the panel stays open when clicking outside.
+            // if let Some(w) = app.get_webview_window("main") {
+            //     let wc = w.clone();
+            //     w.on_window_event(move |ev| {
+            //         if let tauri::WindowEvent::Focused(false) = ev {
+            //             let _ = wc.hide();
+            //         }
+            //     });
+            // }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1308,6 +1775,11 @@ pub fn run() {
             hide,
             open_settings_window,
             close_settings_window,
+            open_themes_window,
+            theme_changed,
+            open_config_file,
+            web_search,
+            run_mode,
             clipboard_history,
             clipboard_apply,
             clipboard_delete,

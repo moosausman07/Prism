@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.0.1"
+version = "0.0.2"
 description = "Prism launcher"
 authors = ["you"]
 edition = "2021"
@@ -28,6 +28,8 @@ arboard = "3"
 chrono = "0.4"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 semver = "1"
+toml = "0.8"
+tauri-plugin-deep-link = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

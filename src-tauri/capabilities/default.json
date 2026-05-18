@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "settings", "reminder"],
+  "windows": ["main", "settings", "reminder", "themes"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
@@ -15,6 +15,7 @@
     "opener:default",
     "dialog:default",
     "global-shortcut:default",
-    "notification:default"
+    "notification:default",
+    "deep-link:default"
   ]
 }
