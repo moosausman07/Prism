@@ -1,6 +1,8 @@
 # Prism
+<img width="1015" height="643" alt="image" src="https://github.com/user-attachments/assets/583d0f9a-4c94-485e-a73c-0a69f0faf898" />
 
-Glassy, keyboard-first launcher for Windows — Raycast-style, built with
+
+keyboard-first launcher for Windows — Raycast-style, built with
 Tauri 2 + Dioxus (Rust/WASM frontend).
 
 ## Run
