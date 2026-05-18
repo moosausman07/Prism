@@ -1234,7 +1234,7 @@ body.light,
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 10px;
+  padding: px 12px;
   border-radius: var(--radius-sm);
   background: transparent;
   border: 1px solid transparent;

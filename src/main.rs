@@ -1,4 +1,5 @@
 mod app;
+mod calc;
 
 use app::App;
 use dioxus::prelude::*;

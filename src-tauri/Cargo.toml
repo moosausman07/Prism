@@ -1,8 +1,8 @@
 [package]
-name = "prism"
+name = "Prism"
 version = "0.0.21"
 description = "Prism launcher"
-authors = ["you"]
+authors = ["Abdullah Moosa Usman"]
 edition = "2021"
 
 [lib]

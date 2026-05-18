@@ -7,6 +7,11 @@ use wasm_bindgen::prelude::*;
 static CSS: Asset = asset!("/assets/styles.css");
 static PRISM_ICON: Asset = asset!("/assets/prism.png");
 static CLIPBOARD_ICON: Asset = asset!("/assets/clipboard_icon.png");
+static REMINDER_ICON: Asset = asset!("/assets/reminder_icon.png");
+static SETTINGS_ICON: Asset = asset!("/assets/settings_icon.png");
+static LOCK_ICON: Asset = asset!("/assets/lock_icon.png");
+static SLEEP_ICON: Asset = asset!("/assets/sleep_icon.png");
+static RESTART_ICON: Asset = asset!("/assets/restart_icon.png");
 
 #[wasm_bindgen]
 extern "C" {
@@ -51,6 +56,11 @@ struct NameArg {
 #[derive(Serialize)]
 struct QueryArg {
     query: String,
+}
+
+#[derive(Serialize)]
+struct TextArg {
+    text: String,
 }
 
 #[derive(Serialize)]
@@ -193,8 +203,25 @@ fn icon_name(e: &Entry) -> &'static str {
         "mode" => "gem",
         "websearch" => "file",
         "themes" => "gem",
+        "calc:calc" => "calc",
+        "calc:ruler" => "ruler",
+        "calc:coins" => "coins",
+        "calc:clock" => "clock",
         _ => "app",
     }
+}
+
+/// Built-in entries that ship a bespoke PNG icon instead of a glyph.
+fn png_icon(e: &Entry) -> Option<Asset> {
+    Some(match e.id.as_str() {
+        "prism.clipboard" => CLIPBOARD_ICON,
+        "prism.reminders" => REMINDER_ICON,
+        "prism.settings" => SETTINGS_ICON,
+        "sys.lock" => LOCK_ICON,
+        "sys.sleep" => SLEEP_ICON,
+        "sys.restart" => RESTART_ICON,
+        _ => return None,
+    })
 }
 
 /// Inline vector icons (Lucide path data), monochrome via currentColor.
@@ -243,6 +270,30 @@ fn Ic(name: String) -> Element {
                     "file" => rsx! {
                         path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
                         polyline { points: "14 2 14 8 20 8" }
+                    },
+                    "calc" => rsx! {
+                        rect { x: "4", y: "2", width: "16", height: "20", rx: "2" }
+                        line { x1: "8", y1: "6", x2: "16", y2: "6" }
+                        line { x1: "8", y1: "14", x2: "8", y2: "14" }
+                        line { x1: "12", y1: "14", x2: "12", y2: "14" }
+                        line { x1: "16", y1: "14", x2: "16", y2: "14" }
+                        line { x1: "8", y1: "18", x2: "8", y2: "18" }
+                        line { x1: "12", y1: "18", x2: "12", y2: "18" }
+                        line { x1: "16", y1: "18", x2: "16", y2: "18" }
+                    },
+                    "ruler" => rsx! {
+                        path { d: "M3 8 8 3l13 13-5 5z" }
+                        line { x1: "9", y1: "8", x2: "11", y2: "10" }
+                        line { x1: "12", y1: "5", x2: "14", y2: "7" }
+                        line { x1: "6", y1: "11", x2: "8", y2: "13" }
+                    },
+                    "coins" => rsx! {
+                        circle { cx: "9", cy: "9", r: "6" }
+                        path { d: "M16.5 5.5a6 6 0 1 1-5 10.5" }
+                    },
+                    "clock" => rsx! {
+                        circle { cx: "12", cy: "12", r: "9" }
+                        polyline { points: "12 7 12 12 15 14" }
                     },
                     _ => rsx! {
                         rect { x: "3", y: "3", width: "18", height: "18", rx: "4" }
@@ -429,6 +480,11 @@ async fn do_activate(
             let _: Option<()> =
                 call("web_search", &QueryArg { query: e.action.clone() }).await;
         }
+        k if k.starts_with("calc:") => {
+            let _: Option<()> =
+                call("copy_text", &TextArg { text: e.action.clone() }).await;
+            return;
+        }
         "clipboard" => show_clipboard.set(true),
         "reminders" => show_reminders.set(true),
         "updates" => show_updates.set(true),
@@ -494,6 +550,7 @@ pub fn App() -> Element {
     let mut show_updates = use_signal(|| false);
     let mut show_actions = use_signal(|| false);
     let mut icons = use_signal(std::collections::HashMap::<String, String>::new);
+    let mut rates = use_signal(std::collections::HashMap::<String, f64>::new);
     let mut expanded = use_signal(|| true);
     let mut nav = use_signal(|| false);
     // None = focus is in the search field; Some(i) = i-th pinned dock circle.
@@ -585,6 +642,18 @@ pub fn App() -> Element {
         }
     });
 
+    // Fetch live currency rates once (cached daily by the backend). Failure
+    // just leaves currency conversion disabled.
+    use_future(move || async move {
+        if let Some(m) =
+            call::<std::collections::HashMap<String, f64>>("currency_rates", &NoArgs {}).await
+        {
+            if !m.is_empty() {
+                rates.set(m);
+            }
+        }
+    });
+
     // Re-apply theme when the OS light/dark preference changes (system mode).
     use_future(move || async move {
         let mut e = document::eval(
@@ -635,6 +704,21 @@ pub fn App() -> Element {
     } else {
         let qt = q.trim();
         let ql = qt.to_lowercase();
+
+        // Calculator / converter — shown at the top when the query parses as
+        // a calculation, conversion, or date/time expression.
+        if let Some(hit) = crate::calc::evaluate(qt, &rates()) {
+            sections.push((
+                hit.kind.label().into(),
+                vec![Entry {
+                    id: "prism.calc".into(),
+                    title: hit.value.clone(),
+                    subtitle: hit.label,
+                    kind: format!("calc:{}", hit.kind.icon()),
+                    action: hit.value,
+                }],
+            ));
+        }
 
         // Alias: typing an alias key jumps straight to its target.
         if let Some(target) = s.aliases.get(&ql) {
@@ -689,21 +773,6 @@ pub fn App() -> Element {
     let act_pin = s.act_pin.to_lowercase();
     let act_open = s.act_open.to_lowercase();
 
-    // Pinned dock entries (mirrors the dock rendered beside the collapsed pill).
-    let pinned_flat: Vec<Entry> = s
-        .pinned
-        .iter()
-        .filter_map(|id| all.iter().find(|e| &e.id == id).cloned())
-        .take(6)
-        .collect();
-    // The dock is only navigable while the launcher is collapsed.
-    let dock_len = if expanded() || !q.trim().is_empty() {
-        0
-    } else {
-        pinned_flat.len()
-    };
-    let pinned_key = pinned_flat.clone();
-
     let onkey = move |ev: KeyboardEvent| {
         let m = ev.modifiers();
         match ev.key() {
@@ -743,40 +812,10 @@ pub fn App() -> Element {
                     scroll_to(n);
                 }
             }
-            Key::ArrowRight => {
-                if dock_len > 0 {
-                    ev.prevent_default();
-                    let n = match dock_sel() {
-                        None => 0,
-                        Some(i) => (i + 1).min(dock_len - 1),
-                    };
-                    dock_sel.set(Some(n));
-                }
-            }
-            Key::ArrowLeft => {
-                if dock_len > 0 {
-                    if let Some(i) = dock_sel() {
-                        ev.prevent_default();
-                        if i == 0 {
-                            dock_sel.set(None);
-                            let _ = document::eval(
-                                "var e=document.getElementById('search');if(e)e.focus();",
-                            );
-                        } else {
-                            dock_sel.set(Some(i - 1));
-                        }
-                    }
-                }
-            }
             Key::Enter => {
                 ev.prevent_default();
-                if let Some(i) = dock_sel() {
-                    let pv = pinned_key.clone();
-                    spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, pv, i));
-                } else {
-                    let flat = flat_key.clone();
-                    spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, flat, cur));
-                }
+                let flat = flat_key.clone();
+                spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, flat, cur));
             }
             Key::Character(c) => {
                 // Action-popup shortcuts: only while the popup is open.
@@ -810,14 +849,6 @@ pub fn App() -> Element {
 
     let collapsed_setting = s.collapsed;
     let open = expanded() || !q.trim().is_empty();
-
-    // Pinned entries shown as a dock of circles beside the collapsed pill.
-    let pinned_entries: Vec<Entry> = s
-        .pinned
-        .iter()
-        .filter_map(|id| all.iter().find(|e| &e.id == id).cloned())
-        .take(6)
-        .collect();
 
     rsx! {
         link { rel: "stylesheet", href: CSS }
@@ -899,15 +930,20 @@ pub fn App() -> Element {
                                             },
                                             if let Some(u) = icon {
                                                 img { class: "icon-img", src: "{u}" }
-                                            } else if e.kind == "clipboard" {
-                                                img { class: "icon-img", src: CLIPBOARD_ICON }
+                                            } else if let Some(p) = png_icon(e) {
+                                                img { class: "icon-img", src: p }
                                             } else {
                                                 div { class: "icon", Ic { name: icon_name(e).to_string() } }
                                             }
                                             div { class: "title", "{e.title}" }
                                             div { class: "subtitle", "{e.subtitle}" }
                                             div { class: "spacer" }
-                                            if pinned {
+                                            if e.kind.starts_with("calc:") {
+                                                div { class: "chips",
+                                                    div { class: "chip", "Copy" }
+                                                    div { class: "chip", "↵" }
+                                                }
+                                            } else if pinned {
                                                 div { class: "chips",
                                                     div { class: "chip pin-chip", Ic { name: "pin".to_string() } }
                                                 }
@@ -966,32 +1002,6 @@ pub fn App() -> Element {
                         }
                     }
                     }
-                    }
-                }
-                if !open && !pinned_entries.is_empty() {
-                    div { class: "dock",
-                        for (i , pe) in pinned_entries.iter().enumerate() {
-                            {
-                                let ic = icons.read().get(&pe.id).cloned();
-                                let pv = pinned_entries.clone();
-                                rsx! {
-                                    button {
-                                        class: if dock_sel() == Some(i) { "circle selected" } else { "circle" },
-                                        title: "{pe.title}",
-                                        style: "animation-delay:{i*40}ms",
-                                        onclick: move |e| {
-                                            e.stop_propagation();
-                                            spawn(do_activate(settings, show_settings, show_clipboard, show_reminders, show_updates, pv.clone(), i));
-                                        },
-                                        if let Some(u) = ic {
-                                            img { class: "circle-img", src: "{u}" }
-                                        } else {
-                                            Ic { name: icon_name(pe).to_string() }
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
                 }

@@ -1397,6 +1397,58 @@ async fn update_install(app: tauri::AppHandle, tag: String) -> Result<(), String
         .map_err(|e| e.to_string())?
 }
 
+// ===== Calculator: clipboard + currency rates =====
+
+/// Copy a calculator/conversion result to the clipboard and hide the launcher.
+#[tauri::command]
+fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.set_text(text).map_err(|e| e.to_string())?;
+    hide_main(&app);
+    Ok(())
+}
+
+/// USD-based exchange rates, cached for the current day.
+static FX_CACHE: std::sync::OnceLock<Mutex<(i64, BTreeMap<String, f64>)>> =
+    std::sync::OnceLock::new();
+
+fn fetch_rates() -> BTreeMap<String, f64> {
+    let day = (chrono::Utc::now().timestamp() / 86_400) as i64;
+    let cell = FX_CACHE.get_or_init(|| Mutex::new((0, BTreeMap::new())));
+    {
+        let c = cell.lock().unwrap();
+        if c.0 == day && !c.1.is_empty() {
+            return c.1.clone();
+        }
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        rates: BTreeMap<String, f64>,
+    }
+    let fetched: Option<BTreeMap<String, f64>> = reqwest::blocking::Client::builder()
+        .user_agent("prism")
+        .build()
+        .ok()
+        .and_then(|cl| cl.get("https://open.er-api.com/v6/latest/USD").send().ok())
+        .and_then(|r| r.json::<Resp>().ok())
+        .map(|r| r.rates);
+    match fetched {
+        Some(rates) if !rates.is_empty() => {
+            *cell.lock().unwrap() = (day, rates.clone());
+            rates
+        }
+        // Keep last-known rates if the refresh failed.
+        _ => cell.lock().unwrap().1.clone(),
+    }
+}
+
+#[tauri::command]
+async fn currency_rates() -> BTreeMap<String, f64> {
+    tauri::async_runtime::spawn_blocking(fetch_rates)
+        .await
+        .unwrap_or_default()
+}
+
 /// Parsed global hotkeys, populated at setup from config.toml.
 #[derive(Default)]
 struct HotkeyState(Mutex<(Option<Shortcut>, Option<Shortcut>)>);
@@ -1790,7 +1842,9 @@ pub fn run() {
             dismiss_alarm,
             update_check,
             update_releases,
-            update_install
+            update_install,
+            copy_text,
+            currency_rates
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
